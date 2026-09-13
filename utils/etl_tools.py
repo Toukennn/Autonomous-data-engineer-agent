@@ -23,6 +23,8 @@ from utils.exceptions import (
     UnsupportedFormatError,
 )
 
+from utils.incremental_state import IncrementalStateStore
+
 
 class ETLTools:
     """
@@ -241,6 +243,178 @@ class ETLTools:
                 f"Failed to save dataset to: {file_path}"
             ) from exc
 
+
+    def _save_dataframe_atomic(
+        self,
+        dataframe: pd.DataFrame,
+        file_path: Path,
+        file_format: str,
+    ) -> None:
+        """
+        Atomically replace a dataset.
+
+        The new dataset is written completely to a temporary file
+        before it replaces the existing dataset.
+        """
+
+        file_format = self._validate_format(
+            file_format
+        )
+
+        temp_file = file_path.with_name(
+            f".{file_path.stem}.tmp{file_path.suffix}"
+        )
+
+        try:
+            self._save_dataframe(
+                dataframe=dataframe,
+                file_path=temp_file,
+                file_format=file_format,
+            )
+
+            temp_file.replace(
+                file_path
+            )
+
+        except DatasetError:
+            try:
+                if temp_file.exists():
+                    temp_file.unlink()
+            except OSError:
+                pass
+
+            raise
+
+        except OSError as exc:
+            try:
+                if temp_file.exists():
+                    temp_file.unlink()
+            except OSError:
+                pass
+
+            raise DatasetError(
+                f"Failed to atomically save dataset: {file_path}"
+            ) from exc
+
+
+    @staticmethod
+    def _save_json_atomic(
+        payload: dict,
+        file_path: Path,
+    ) -> None:
+        """
+        Atomically save a JSON metadata file.
+        """
+
+        temp_file = file_path.with_name(
+            f".{file_path.name}.tmp"
+        )
+
+        try:
+            file_path.parent.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+
+            with temp_file.open(
+                "w",
+                encoding="utf-8",
+            ) as file:
+                json.dump(
+                    payload,
+                    file,
+                    indent=2,
+                    ensure_ascii=False,
+                )
+
+            temp_file.replace(
+                file_path
+            )
+
+        except (
+            OSError,
+            TypeError,
+            ValueError,
+        ) as exc:
+
+            try:
+                if temp_file.exists():
+                    temp_file.unlink()
+            except OSError:
+                pass
+
+            raise DatasetError(
+                "Failed to atomically save extraction metadata."
+            ) from exc
+
+
+    def _merge_incremental_dataframe(
+        self,
+        existing_file: Path,
+        new_dataframe: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """
+        Merge newly extracted records with an existing dataset.
+
+        Exact duplicate rows are removed so retrying an extraction
+        after a checkpoint-write failure does not duplicate records.
+
+        Schema changes are rejected for now. Schema evolution will be
+        handled explicitly in a later phase.
+        """
+
+        if not existing_file.exists():
+            return new_dataframe.copy()
+
+        existing_dataframe = (
+            self._load_dataframe(
+                str(existing_file)
+            )
+        )
+
+        if new_dataframe.empty:
+            return existing_dataframe
+
+        if (
+            set(existing_dataframe.columns)
+            != set(new_dataframe.columns)
+        ):
+            raise DatasetError(
+                "Incremental API schema changed. "
+                "Schema evolution is not yet enabled."
+            )
+
+        # Preserve the existing column order.
+        new_dataframe = new_dataframe[
+            existing_dataframe.columns
+        ]
+
+        combined = pd.concat(
+            [
+                existing_dataframe,
+                new_dataframe,
+            ],
+            ignore_index=True,
+        )
+
+        # Important for idempotent retries:
+        #
+        # data may have been successfully saved before a crash
+        # prevented the checkpoint from advancing. Re-fetching those
+        # same records must not duplicate them.
+        combined = (
+            combined
+            .drop_duplicates(
+                keep="last"
+            )
+            .reset_index(
+                drop=True
+            )
+        )
+
+        return combined
+            
+
     # ============================================================
     # API EXTRACTION
     # ============================================================
@@ -254,66 +428,183 @@ class ETLTools:
         records_path: str | None = "results",
         next_path: str | None = "next",
         use_auth: bool = False,
+        state_key: str | None = None,
+        watermark_param: str | None = None,
+        watermark_field: str | None = None,
     ) -> str:
         """
-        Extract records from an API and save them as a dataset.
+        Extract API records and persist them safely.
 
-        HTTP communication, retries, pagination, rate-limit handling,
-        authentication, and response-size limits are delegated to
-        APIClient.
+        Incremental ingestion is enabled when incremental configuration
+        is supplied.
 
-        ETLTools remains responsible for converting extracted records
-        into a DataFrame and storing the result.
+        The checkpoint is advanced only after:
 
-        Args:
-            url:
-                API endpoint.
-
-            output_folder:
-                Folder inside the project's data directory.
-
-            format:
-                csv, json, or parquet.
-
-            paginate:
-                Whether pagination should be followed.
-
-            records_path:
-                Dotted JSON path containing the records.
-
-                Example:
-                    "results"
-                    "data.results"
-
-            next_path:
-                Dotted JSON path containing the next-page URL.
-
-                Example:
-                    "next"
-                    "pagination.next"
-
-            use_auth:
-                Whether configured API authentication should be used.
-
-        Returns:
-            Description of the extraction and saved files.
+        1. API extraction succeeds.
+        2. Dataset persistence succeeds.
+        3. Extraction metadata persistence succeeds.
         """
 
-        # --------------------------------------------------------
-        # Validate output
-        # --------------------------------------------------------
+        # ============================================================
+        # OUTPUT VALIDATION
+        # ============================================================
 
         file_format = self._validate_format(
             format
         )
 
-        output_directory = self._resolve_data_path(
-            output_folder
+        output_directory = (
+            self._resolve_data_path(
+                output_folder
+            )
         )
 
-        # --------------------------------------------------------
-        # Extract records through APIClient
-        # --------------------------------------------------------
+        output_file = (
+            output_directory
+            / f"extracted_data.{file_format}"
+        )
+
+        metadata_file = (
+            output_directory
+            / "extraction_metadata.json"
+        )
+
+        # ============================================================
+        # INCREMENTAL CONFIGURATION
+        # ============================================================
+
+        incremental_enabled = any(
+            value is not None
+            for value in (
+                state_key,
+                watermark_param,
+                watermark_field,
+            )
+        )
+
+        state_store = None
+        previous_watermark = None
+
+        if incremental_enabled:
+
+            if (
+                state_key is None
+                or not state_key.strip()
+            ):
+                raise DatasetError(
+                    "Incremental ingestion requires a state key."
+                )
+
+            if (
+                watermark_param is None
+                or not watermark_param.strip()
+            ):
+                raise DatasetError(
+                    "Incremental ingestion requires "
+                    "a watermark parameter."
+                )
+
+            if (
+                watermark_field is None
+                or not watermark_field.strip()
+            ):
+                raise DatasetError(
+                    "Incremental ingestion requires "
+                    "a watermark field."
+                )
+
+            state_store = IncrementalStateStore(
+                data_root=self.data_root
+            )
+
+            state = state_store.load(
+                state_key
+            )
+
+            if state is not None:
+
+                if "cursor_value" not in state:
+                    raise DatasetError(
+                        "Incremental checkpoint does not contain "
+                        "a cursor value."
+                    )
+
+                previous_watermark = (
+                    state["cursor_value"]
+                )
+
+                if (
+                    previous_watermark is not None
+                    and (
+                        isinstance(
+                            previous_watermark,
+                            bool,
+                        )
+                        or not isinstance(
+                            previous_watermark,
+                            (
+                                str,
+                                int,
+                                float,
+                            ),
+                        )
+                    )
+                ):
+                    raise DatasetError(
+                        "Incremental checkpoint contains "
+                        "an unsupported cursor value."
+                    )
+
+                # ----------------------------------------------------
+                # Prevent accidental checkpoint reuse
+                # ----------------------------------------------------
+
+                state_metadata = (
+                    state.get(
+                        "metadata",
+                        {}
+                    )
+                )
+
+                expected_metadata = {
+                    "source_url": url,
+                    "watermark_param": (
+                        watermark_param
+                    ),
+                    "watermark_field": (
+                        watermark_field
+                    ),
+                }
+
+                if isinstance(
+                    state_metadata,
+                    dict,
+                ):
+                    for (
+                        key,
+                        expected_value,
+                    ) in expected_metadata.items():
+
+                        stored_value = (
+                            state_metadata.get(
+                                key
+                            )
+                        )
+
+                        if (
+                            stored_value is not None
+                            and stored_value
+                            != expected_value
+                        ):
+                            raise DatasetError(
+                                "Incremental state key is already "
+                                "associated with a different "
+                                f"{key}."
+                            )
+
+        # ============================================================
+        # API EXTRACTION
+        # ============================================================
 
         result = self.api_client.extract_records(
             url=url,
@@ -321,14 +612,29 @@ class ETLTools:
             records_path=records_path,
             next_path=next_path,
             use_auth=use_auth,
+            watermark_param=(
+                watermark_param
+                if incremental_enabled
+                else None
+            ),
+            watermark_field=(
+                watermark_field
+                if incremental_enabled
+                else None
+            ),
+            watermark_value=(
+                previous_watermark
+                if incremental_enabled
+                else None
+            ),
         )
 
-        # --------------------------------------------------------
-        # Convert records into tabular data
-        # --------------------------------------------------------
+        # ============================================================
+        # TABULAR CONVERSION
+        # ============================================================
 
         try:
-            dataframe = pd.json_normalize(
+            new_dataframe = pd.json_normalize(
                 result.records
             )
 
@@ -338,61 +644,111 @@ class ETLTools:
                 "into a tabular dataset."
             ) from exc
 
-        # --------------------------------------------------------
-        # Save extracted dataset
-        # --------------------------------------------------------
+        # ============================================================
+        # INCREMENTAL MERGE
+        # ============================================================
 
-        output_file = (
-            output_directory
-            / f"extracted_data.{file_format}"
-        )
+        if incremental_enabled:
 
-        self._save_dataframe(
+            dataframe = (
+                self._merge_incremental_dataframe(
+                    existing_file=output_file,
+                    new_dataframe=new_dataframe,
+                )
+            )
+
+        else:
+            dataframe = new_dataframe
+
+        # ============================================================
+        # DURABLE DATASET SAVE
+        # ============================================================
+
+        self._save_dataframe_atomic(
             dataframe=dataframe,
             file_path=output_file,
             file_format=file_format,
         )
 
-        # --------------------------------------------------------
-        # Save extraction metadata
-        # --------------------------------------------------------
+        # ============================================================
+        # EXTRACTION METADATA
+        # ============================================================
 
-        metadata_file = (
-            output_directory
-            / "extraction_metadata.json"
+        extraction_metadata = dict(
+            result.metadata
         )
 
-        try:
-            output_directory.mkdir(
-                parents=True,
-                exist_ok=True,
+        extraction_metadata.update(
+            {
+                "state_key": (
+                    state_key
+                    if incremental_enabled
+                    else None
+                ),
+                "rows_in_batch": len(
+                    new_dataframe
+                ),
+                "rows_in_dataset": len(
+                    dataframe
+                ),
+            }
+        )
+
+        self._save_json_atomic(
+            payload=extraction_metadata,
+            file_path=metadata_file,
+        )
+
+        # ============================================================
+        # CHECKPOINT COMMIT
+        # ============================================================
+        #
+        # This MUST remain after both durable writes above.
+        # ============================================================
+
+        checkpoint_file = None
+
+        if incremental_enabled:
+
+            next_watermark = (
+                result.metadata.get(
+                    "next_watermark"
+                )
             )
 
-            with metadata_file.open(
-                "w",
-                encoding="utf-8",
-            ) as file:
-                json.dump(
-                    result.metadata,
-                    file,
-                    indent=2,
-                    ensure_ascii=False,
+            # If no watermark has ever been observed, there is nothing
+            # useful to checkpoint yet.
+            if next_watermark is not None:
+
+                checkpoint_file = (
+                    state_store.save(
+                        state_key,
+                        cursor_value=next_watermark,
+                        metadata={
+                            "source_url": url,
+                            "watermark_param": (
+                                watermark_param
+                            ),
+                            "watermark_field": (
+                                watermark_field
+                            ),
+                            "output_file": str(
+                                output_file
+                            ),
+                        },
+                    )
                 )
 
-        except Exception as exc:
-            raise DatasetError(
-                "Extracted data was created, but extraction "
-                "metadata could not be saved."
-            ) from exc
+        # ============================================================
+        # RESULT
+        # ============================================================
 
-        # --------------------------------------------------------
-        # Result summary
-        # --------------------------------------------------------
-
-        return (
+        summary = (
             "Data successfully extracted.\n"
-            f"Rows: {len(dataframe)}\n"
-            f"Columns: {len(dataframe.columns)}\n"
+            f"Rows in this extraction: "
+            f"{len(new_dataframe)}\n"
+            f"Rows in dataset: "
+            f"{len(dataframe)}\n"
             f"Pages fetched: "
             f"{result.metadata['pages_fetched']}\n"
             f"Bytes downloaded: "
@@ -400,6 +756,23 @@ class ETLTools:
             f"Dataset: {output_file}\n"
             f"Metadata: {metadata_file}"
         )
+
+        if incremental_enabled:
+            summary += (
+                "\nIncremental ingestion: enabled"
+                f"\nPrevious watermark: "
+                f"{previous_watermark}"
+                f"\nNext watermark: "
+                f"{result.metadata.get('next_watermark')}"
+            )
+
+            if checkpoint_file is not None:
+                summary += (
+                    f"\nCheckpoint: "
+                    f"{checkpoint_file}"
+                )
+
+        return summary
     # ============================================================
     # DATASET CONTEXT
     # ============================================================

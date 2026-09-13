@@ -18,6 +18,10 @@ from utils.exceptions import (
     UnsupportedFormatError,
 )
 
+from utils.incremental_state import (
+    IncrementalStateStore
+)
+
 
 def test_filter_and_select_columns(
     isolated_etl_tools,
@@ -465,3 +469,201 @@ def test_api_extraction_without_real_network(
         "Pages fetched: 1"
         in result
     )
+
+
+def test_incremental_checkpoint_advances_after_save(
+    isolated_etl_tools,
+    monkeypatch,
+):
+    fake_result = APIExtractionResult(
+        records=[
+            {
+                "id": 101,
+                "name": "a",
+            },
+            {
+                "id": 102,
+                "name": "b",
+            },
+        ],
+        metadata={
+            "source_url": "https://example.com/orders",
+            "pages_fetched": 1,
+            "records_extracted": 2,
+            "bytes_downloaded": 20,
+            "pagination_enabled": True,
+            "records_path": "results",
+            "next_path": "next",
+            "authenticated": False,
+            "incremental_enabled": True,
+            "watermark_param": "after_id",
+            "watermark_field": "id",
+            "previous_watermark": 100,
+            "next_watermark": 102,
+        },
+    )
+
+    store = IncrementalStateStore(
+        isolated_etl_tools.data_root
+    )
+
+    store.save(
+        "orders",
+        cursor_value=100,
+        metadata={
+            "source_url": "https://example.com/orders",
+            "watermark_param": "after_id",
+            "watermark_field": "id",
+        },
+    )
+
+    def fake_extract_records(
+        *args,
+        **kwargs,
+    ):
+        assert (
+            kwargs["watermark_value"]
+            == 100
+        )
+
+        return fake_result
+
+    monkeypatch.setattr(
+        isolated_etl_tools.api_client,
+        "extract_records",
+        fake_extract_records,
+    )
+
+    isolated_etl_tools.extract_load(
+        url="https://example.com/orders",
+        output_folder="data/orders",
+        format="csv",
+        state_key="orders",
+        watermark_param="after_id",
+        watermark_field="id",
+    )
+
+    state = store.load(
+        "orders"
+    )
+
+    assert (
+        state["cursor_value"]
+        == 102
+    )
+
+
+def test_checkpoint_does_not_advance_when_dataset_save_fails(
+    isolated_etl_tools,
+    monkeypatch,
+):
+    fake_result = APIExtractionResult(
+        records=[
+            {
+                "id": 101
+            }
+        ],
+        metadata={
+            "pages_fetched": 1,
+            "records_extracted": 1,
+            "bytes_downloaded": 10,
+            "next_watermark": 101,
+        },
+    )
+
+    store = IncrementalStateStore(
+        isolated_etl_tools.data_root
+    )
+
+    store.save(
+        "orders",
+        cursor_value=100,
+    )
+
+    monkeypatch.setattr(
+        isolated_etl_tools.api_client,
+        "extract_records",
+        lambda *args, **kwargs: fake_result,
+    )
+
+    def fail_save(
+        *args,
+        **kwargs,
+    ):
+        raise DatasetError(
+            "simulated disk failure"
+        )
+
+    monkeypatch.setattr(
+        isolated_etl_tools,
+        "_save_dataframe_atomic",
+        fail_save,
+    )
+
+    with pytest.raises(
+        DatasetError,
+        match="simulated disk failure",
+    ):
+        isolated_etl_tools.extract_load(
+            url="https://example.com/orders",
+            output_folder="data/orders",
+            format="csv",
+            state_key="orders",
+            watermark_param="after_id",
+            watermark_field="id",
+        )
+
+    state = store.load(
+        "orders"
+    )
+
+    assert (
+        state["cursor_value"]
+        == 100
+    )
+
+
+def test_incremental_retry_does_not_duplicate_rows(
+    isolated_etl_tools,
+):
+    existing_file = (
+        isolated_etl_tools.data_root
+        / "orders"
+        / "extracted_data.csv"
+    )
+
+    existing = pd.DataFrame(
+        {
+            "id": [100, 101],
+            "name": ["old", "new"],
+        }
+    )
+
+    isolated_etl_tools._save_dataframe(
+        existing,
+        existing_file,
+        "csv",
+    )
+
+    repeated_batch = pd.DataFrame(
+        {
+            "id": [101, 102],
+            "name": ["new", "latest"],
+        }
+    )
+
+    result = (
+        isolated_etl_tools
+        ._merge_incremental_dataframe(
+            existing_file=existing_file,
+            new_dataframe=repeated_batch,
+        )
+    )
+
+    assert list(
+        result["id"]
+    ) == [
+        100,
+        101,
+        102,
+    ]
