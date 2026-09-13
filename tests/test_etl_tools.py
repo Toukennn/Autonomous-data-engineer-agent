@@ -777,3 +777,58 @@ def test_incremental_checkpoint_is_passed_to_api_client(
         captured["watermark_value"]
         == 250
     )
+
+
+def test_incremental_schema_change_reports_added_columns(
+    isolated_etl_tools,
+):
+    existing_file = (
+        isolated_etl_tools.data_root
+        / "orders"
+        / "extracted_data.csv"
+    )
+
+    existing = pd.DataFrame(
+        {
+            "id": [
+                1,
+                2,
+            ],
+            "name": [
+                "a",
+                "b",
+            ],
+        }
+    )
+
+    isolated_etl_tools._save_dataframe(
+        dataframe=existing,
+        file_path=existing_file,
+        file_format="csv",
+    )
+
+    incoming = pd.DataFrame(
+        {
+            "id": [
+                3
+            ],
+            "name": [
+                "c"
+            ],
+            "category": [
+                "new"
+            ],
+        }
+    )
+
+    with pytest.raises(
+        DatasetError,
+        match="Added columns",
+    ):
+        (
+            isolated_etl_tools
+            ._merge_incremental_dataframe(
+                existing_file=existing_file,
+                new_dataframe=incoming,
+            )
+        )

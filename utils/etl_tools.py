@@ -25,6 +25,10 @@ from utils.exceptions import (
 
 from utils.incremental_state import IncrementalStateStore
 
+from utils.schema_evolution import (
+    compare_schemas,
+)
+
 
 class ETLTools:
     """
@@ -375,13 +379,37 @@ class ETLTools:
         if new_dataframe.empty:
             return existing_dataframe
 
-        if (
-            set(existing_dataframe.columns)
-            != set(new_dataframe.columns)
-        ):
+        schema_diff = compare_schemas(
+            existing_dataframe=existing_dataframe,
+            incoming_dataframe=new_dataframe,
+        )
+
+        if schema_diff.has_changes:
+
+            details = []
+
+            if schema_diff.added_columns:
+                details.append(
+                    "Added columns: "
+                    f"{list(schema_diff.added_columns)}."
+                )
+
+            if schema_diff.removed_columns:
+                details.append(
+                    "Removed columns: "
+                    f"{list(schema_diff.removed_columns)}."
+                )
+
+            if schema_diff.type_changes:
+                details.append(
+                    "Type changes: "
+                    f"{schema_diff.type_changes}."
+                )
+
             raise DatasetError(
                 "Incremental API schema changed. "
-                "Schema evolution is not yet enabled."
+                + " ".join(details)
+                + " Automatic schema evolution is not yet enabled."
             )
 
         # Preserve the existing column order.
