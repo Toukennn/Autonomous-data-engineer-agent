@@ -1,10 +1,10 @@
 from langchain_core.messages import AIMessage
 from langgraph.graph import END, START, StateGraph
 
-from models.schema import AgentSchema, JudgeSchema
+from models.schema import AgentSchema
 from utils.database import DatabaseUtil, load_database_config
 from utils.llm_pick import pick_llm
-
+from utils.sql_safety import SQLSafetyValidator
 
 # ============================================================
 # HELPERS
@@ -186,85 +186,29 @@ def generate_sql(state: AgentSchema):
 # NODE 4 — SAFETY JUDGE
 # ============================================================
 
-def check_sql_safety(state: AgentSchema):
+def check_sql_safety(
+    state: AgentSchema,
+):
     """
-    Ask an LLM judge whether the generated SQL is read-only.
+    Deterministically validate generated SQL.
 
-    NOTE:
-    This is currently only one safety layer.
-
-    Later we should replace/augment this with deterministic SQL
-    parsing and database-level read-only permissions.
+    Security decisions are made by SQL parsing,
+    not by an LLM.
     """
 
-    sql_query = state.generated_sql_query
-
-    llm = pick_llm("medium")
-
-    safety_llm = llm.with_structured_output(
-        JudgeSchema
-    )
-
-    prompt = f"""
-You are a PostgreSQL query safety reviewer.
-
-Determine whether the following SQL query is safe to execute
-against a production-style analytical database.
-
-A safe query must be READ-ONLY.
-
-Safe examples include:
-
-- SELECT
-- SELECT with JOIN
-- SELECT with GROUP BY
-- SELECT with aggregate functions
-- SELECT with CTEs that are themselves read-only
-
-Unsafe SQL includes anything that modifies data, database
-structure, configuration, users, permissions, or transactions.
-
-Reject queries containing or performing operations such as:
-
-- INSERT
-- UPDATE
-- DELETE
-- DROP
-- ALTER
-- TRUNCATE
-- CREATE
-- GRANT
-- REVOKE
-- COPY TO/FROM in unsafe contexts
-- CALL
-- DO
-- transaction manipulation
-- multiple SQL statements where one may be unsafe
-
-Return:
-
-answer = "YES"
-
-only if the query is read-only.
-
-Otherwise return:
-
-answer = "NO"
-
-Also provide a short explanation.
-
-SQL query:
-
-{sql_query}
-"""
-
-    result = safety_llm.invoke(
-        prompt
+    validation = (
+        SQLSafetyValidator.validate(
+            state.generated_sql_query
+        )
     )
 
     return {
-        "is_safe": result.answer,
-        "comments": result.comments,
+        "is_safe": (
+            "YES"
+            if validation.is_safe
+            else "NO"
+        ),
+        "comments": validation.reason,
     }
 
 
@@ -305,7 +249,7 @@ def execute_sql(state: AgentSchema):
     database = get_database()
 
     try:
-        result = database.execute_sql(
+        result = database.execute_read_only(
             state.generated_sql_query
         )
 

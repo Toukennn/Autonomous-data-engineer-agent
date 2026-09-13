@@ -2,112 +2,391 @@ import os
 from pathlib import Path
 
 import psycopg2
+from psycopg2 import sql
 from dotenv import load_dotenv
 
 
-load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+# ============================================================
+# ENVIRONMENT
+# ============================================================
 
+PROJECT_ROOT = (
+    Path(__file__).resolve().parents[1]
+)
+
+load_dotenv(
+    PROJECT_ROOT / ".env"
+)
+
+
+# ============================================================
+# DATABASE UTIL
+# ============================================================
 
 class DatabaseUtil:
+    """
+    PostgreSQL utility used by the SQL analyst.
 
-    def __init__(self, db_config):
+    Query execution is performed inside read-only transactions
+    with a statement timeout and result-size limit.
+    """
+
+    def __init__(
+        self,
+        db_config: dict,
+    ):
         self.db_config = db_config
 
-        try: 
-            self.connection = psycopg2.connect(**db_config) 
+
+    # ========================================================
+    # CONNECTION
+    # ========================================================
+
+    def _connect(self):
+        """
+        Create a PostgreSQL connection.
+        """
+
+        try:
+
+            return psycopg2.connect(
+                **self.db_config
+            )
 
         except psycopg2.Error as exc:
+
             raise ConnectionError(
-                "Could not connect to PostgreSQL. Check the database credentials."
+                "Could not connect to PostgreSQL. "
+                "Check the database credentials."
             ) from exc
 
-    def schema_details(self,schema_name):
 
-        schema_info_context = ""
-        
-        connection = self.connection
-        cursor = connection.cursor()
+    # ========================================================
+    # SCHEMA INFORMATION
+    # ========================================================
 
-        schema_info_context = f"Database Schema: {schema_name}\n"
+    def schema_details(
+        self,
+        schema_name: str,
+    ) -> str:
+        """
+        Retrieve table and column metadata for the selected schema.
+        """
 
-        try: 
+        context_parts = [
+            f"Database Schema: {schema_name}"
+        ]
 
-            cursor.execute("SELECT table_name from information_schema.tables where table_schema = %s;", (schema_name,))
-            tables_list = cursor.fetchall()
+        connection = self._connect()
 
-            for table in tables_list:
-                table_name = table[0]
-                schema_info_context = f"{schema_info_context}\nTable: {table_name}\n"
-
-                # Adding Columns & Data Types
-                cursor.execute("SELECT column_name, data_type FROM information_schema.columns WHERE table_name = %s;", (table_name,))
-                columns_list = cursor.fetchall()
-
-                for column in columns_list:
-                    column_name = column[0]
-                    data_type = column[1]
-                    schema_info_context = f"{schema_info_context}  Column: {column_name}, Data Type: {data_type}\n"
-
-                # Adding Sample Data
-                cursor.execute(f"SELECT * FROM {schema_name}.{table_name} LIMIT 5;")
-                sample_data = cursor.fetchall()
-                schema_info_context = f"{schema_info_context}  Sample Data:\n"
-                for row in sample_data:
-                    schema_info_context = f"{schema_info_context}    {row}\n"
-
-        except Exception as e:
-            print(f"Error fetching schema details: {e}")
-            schema_info_context = f"Error fetching schema details: {e}"
-
-        finally:
-            if cursor:
-                cursor.close()
-            if connection:
-                connection.close()
-        
-        return schema_info_context
-
-    def execute_sql(self, query):
         try:
-            connection = self.connection
-            cursor = connection.cursor()
-            cursor.execute(query)
-            result = cursor.fetchall()
-            connection.commit()
-            return str(result) # this is important since the result of fetchall() is a list 
-                               # but our result in the schema expects a string datatype! 
-        except Exception as e:
-            print(f"Error executing query: {e}")
-            return None
+
+            with connection.cursor() as cursor:
+
+                # ------------------------------------------------
+                # Tables
+                # ------------------------------------------------
+
+                cursor.execute(
+                    """
+                    SELECT table_name
+                    FROM information_schema.tables
+                    WHERE table_schema = %s
+                      AND table_type = 'BASE TABLE'
+                    ORDER BY table_name;
+                    """,
+                    (schema_name,),
+                )
+
+                tables = cursor.fetchall()
+
+                for (table_name,) in tables:
+
+                    context_parts.append(
+                        f"\nTable: {table_name}"
+                    )
+
+                    # --------------------------------------------
+                    # Columns
+                    # --------------------------------------------
+
+                    cursor.execute(
+                        """
+                        SELECT
+                            column_name,
+                            data_type
+                        FROM information_schema.columns
+                        WHERE table_schema = %s
+                          AND table_name = %s
+                        ORDER BY ordinal_position;
+                        """,
+                        (
+                            schema_name,
+                            table_name,
+                        ),
+                    )
+
+                    columns = (
+                        cursor.fetchall()
+                    )
+
+                    for (
+                        column_name,
+                        data_type,
+                    ) in columns:
+
+                        context_parts.append(
+                            f"  Column: "
+                            f"{column_name}, "
+                            f"Data Type: {data_type}"
+                        )
+
+                    # --------------------------------------------
+                    # Small sample
+                    # --------------------------------------------
+
+                    sample_query = sql.SQL(
+                        """
+                        SELECT *
+                        FROM {}.{}
+                        LIMIT 5
+                        """
+                    ).format(
+                        sql.Identifier(
+                            schema_name
+                        ),
+                        sql.Identifier(
+                            table_name
+                        ),
+                    )
+
+                    cursor.execute(
+                        sample_query
+                    )
+
+                    sample_rows = (
+                        cursor.fetchall()
+                    )
+
+                    context_parts.append(
+                        "  Sample Data:"
+                    )
+
+                    for row in sample_rows:
+
+                        context_parts.append(
+                            f"    {row}"
+                        )
+
+        except psycopg2.Error as exc:
+
+            raise RuntimeError(
+                "Failed to retrieve database "
+                "schema information."
+            ) from exc
+
         finally:
-            if cursor:
-                cursor.close()
-            if connection:
-                connection.close()
+
+            connection.close()
+
+        return "\n".join(
+            context_parts
+        )
 
 
-def load_database_config():
+    # ========================================================
+    # SAFE QUERY EXECUTION
+    # ========================================================
+
+    def execute_read_only(
+        self,
+        query: str,
+        statement_timeout_ms: int = 10_000,
+        max_rows: int = 1_000,
+    ) -> str:
+        """
+        Execute one query inside a PostgreSQL read-only transaction.
+
+        Protections:
+
+        - transaction is READ ONLY
+        - statement timeout
+        - maximum number of returned rows
+        - automatic rollback / cleanup
+
+        Args:
+            query:
+                Validated SQL query.
+
+            statement_timeout_ms:
+                Maximum database execution time.
+
+            max_rows:
+                Maximum rows returned to the application.
+
+        Returns:
+            String representation of the query result.
+        """
+
+        connection = self._connect()
+
+        try:
+
+            # ----------------------------------------------------
+            # Database-level protection
+            # ----------------------------------------------------
+
+            connection.set_session(
+                readonly=True,
+                autocommit=False,
+            )
+
+            with connection.cursor() as cursor:
+
+                # -----------------------------------------------
+                # Statement timeout
+                # -----------------------------------------------
+
+                cursor.execute(
+                    """
+                    SELECT set_config(
+                        'statement_timeout',
+                        %s,
+                        true
+                    );
+                    """,
+                    (
+                        f"{statement_timeout_ms}ms",
+                    ),
+                )
+
+                # -----------------------------------------------
+                # Execute validated query
+                # -----------------------------------------------
+
+                cursor.execute(
+                    query
+                )
+
+                if cursor.description is None:
+
+                    raise RuntimeError(
+                        "Read-only SQL query did not "
+                        "produce a result set."
+                    )
+
+                # Fetch one extra row so we can determine
+                # whether truncation happened.
+                rows = cursor.fetchmany(
+                    max_rows + 1
+                )
+
+                truncated = (
+                    len(rows) > max_rows
+                )
+
+                rows = rows[
+                    :max_rows
+                ]
+
+                column_names = [
+                    description.name
+                    for description
+                    in cursor.description
+                ]
+
+                result = {
+                    "columns": column_names,
+                    "rows": rows,
+                    "row_count": len(rows),
+                    "truncated": truncated,
+                }
+
+                # Read-only transaction: rollback deliberately.
+                connection.rollback()
+
+                return str(
+                    result
+                )
+
+        except psycopg2.Error as exc:
+
+            connection.rollback()
+
+            raise RuntimeError(
+                f"SQL execution failed: {exc}"
+            ) from exc
+
+        finally:
+
+            connection.close()
+
+
+# ============================================================
+# CONFIG
+# ============================================================
+
+def load_database_config() -> dict:
+
     env_names = {
         "host": "host",
         "user": "user",
         "password": "password",
         "dbname": "database",
     }
-    config = {key: os.getenv(env_name) for key, env_name in env_names.items()}
-    missing = [env_name for key, env_name in env_names.items() if not config[key]]
+
+    config = {
+        key: os.getenv(env_name)
+        for key, env_name
+        in env_names.items()
+    }
+
+    missing = [
+        env_name
+        for key, env_name
+        in env_names.items()
+        if not config[key]
+    ]
 
     if missing:
+
         raise RuntimeError(
-            f"Missing required database variables in .env: {', '.join(missing)}"
+            "Missing required database "
+            "environment variables: "
+            + ", ".join(missing)
         )
 
-    config["port"] = int(os.getenv("port", "5432"))
+    try:
+
+        config["port"] = int(
+            os.getenv(
+                "port",
+                "5432",
+            )
+        )
+
+    except ValueError as exc:
+
+        raise RuntimeError(
+            "Database port must be "
+            "a valid integer."
+        ) from exc
+
     return config
 
 
-if __name__ == "__main__":
-    obj = DatabaseUtil(load_database_config())
-    result = obj.schema_details("public")
+# ============================================================
+# LOCAL TEST
+# ============================================================
 
-    with open("test_schema_details_example.txt", "w") as f:
-        f.write(result) # to test of the context has been generated correctly for the LLM
+if __name__ == "__main__":
+
+    db = DatabaseUtil(
+        load_database_config()
+    )
+
+    print(
+        db.schema_details(
+            "public"
+        )
+    )
