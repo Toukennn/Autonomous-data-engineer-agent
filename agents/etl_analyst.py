@@ -6,6 +6,66 @@ from models.schema import ETLAgentSchema, TransformPlan
 from utils.etl_tools import ETLTools
 from utils.llm_pick import pick_llm
 
+from utils.data_layers import DataLayer
+
+def create_transform_plan(
+    *,
+    user_question: str,
+    dataset_context: str,
+) -> TransformPlan:
+    """
+    Create a validated deterministic transformation plan.
+
+    The LLM decides WHAT transformations are required.
+    ETLTools deterministically controls HOW they are executed.
+    """
+
+    planner_llm = (
+        pick_llm("claude")
+        .with_structured_output(
+            TransformPlan
+        )
+    )
+
+    prompt = f"""
+You are an ETL transformation planner.
+
+Your job is NOT to write Python code.
+
+Create a structured transformation plan using only the
+operations available in the TransformPlan schema.
+
+The plan will be executed by trusted deterministic Python code.
+
+User request:
+
+{user_question}
+
+
+Dataset metadata:
+
+{dataset_context}
+
+
+Rules:
+
+- Never generate Python code.
+- Never generate shell commands.
+- Never perform filesystem operations.
+- Never invent column names.
+- Only reference columns present in the dataset metadata.
+- Use the minimum number of operations required.
+- Preserve columns unless the user explicitly requests otherwise.
+- Operations execute in the exact order you provide.
+- If a type conversion is needed before a comparison or aggregation,
+  perform the cast first.
+- The summary must briefly explain the transformation.
+"""
+
+    return planner_llm.invoke(
+        prompt
+    )
+
 
 # ============================================================
 # TOOLS
@@ -146,101 +206,128 @@ def extract_load_tool(
         watermark_field=watermark_field,
     )
 
+
 @tool
-def transform_load_tool(
-    input_file_path: str,
-    output_folder: str = "data/transform",
+def bronze_to_silver_tool(
+    source_dataset_name: str,
+    user_question: str,
+    target_dataset_name: str | None = None,
     output_format: str = "csv",
-    user_question: str = "",
 ) -> str:
     """
-    Safely transform an existing dataset according to the user's request.
+    Transform a Bronze dataset into a cleaned and standardized
+    Silver dataset.
 
-    The LLM creates a structured transformation plan.
-    The plan is validated with Pydantic and executed using deterministic
-    Pandas operations.
+    Dataset names are logical identifiers, not filesystem paths.
 
-    Arbitrary Python execution is not allowed.
+    The transformation request is converted by the planner LLM
+    into a validated TransformPlan. Trusted deterministic code
+    executes the plan.
 
     Args:
-        input_file_path:
-            Input dataset located inside the project's data directory.
+        source_dataset_name:
+            Existing Bronze dataset name.
 
-        output_folder:
-            Folder inside the data directory where the transformed
-            dataset should be saved.
+        user_question:
+            Transformation requested by the user.
+
+        target_dataset_name:
+            Optional Silver dataset name. If omitted, the source
+            dataset name is reused.
 
         output_format:
             csv, json, or parquet.
-
-        user_question:
-            Natural-language transformation request.
-
-    Returns:
-        Description of the executed transformation.
     """
 
     etl_tools = ETLTools()
 
     dataset_context = (
-        etl_tools.get_dataset_context(
-            input_file_path
+        etl_tools.get_layer_dataset_context(
+            layer=DataLayer.BRONZE,
+            dataset_name=source_dataset_name,
         )
     )
 
-    planner_llm = (
-        pick_llm("claude")
-        .with_structured_output(
-            TransformPlan
+    plan = create_transform_plan(
+        user_question=user_question,
+        dataset_context=dataset_context,
+    )
+
+    return (
+        etl_tools
+        .transform_bronze_to_silver(
+            source_dataset_name=(
+                source_dataset_name
+            ),
+            target_dataset_name=(
+                target_dataset_name
+            ),
+            output_format=(
+                output_format
+            ),
+            plan=plan,
         )
     )
 
-    prompt = f"""
-You are an ETL transformation planner.
 
-Your job is NOT to write Python code.
+@tool
+def silver_to_gold_tool(
+    source_dataset_name: str,
+    user_question: str,
+    target_dataset_name: str | None = None,
+    output_format: str = "csv",
+) -> str:
+    """
+    Curate a Silver dataset into an analytics-ready Gold dataset.
 
-Instead, create a structured transformation plan using only
-the transformation operations available in the provided schema.
+    Use this for business-oriented filtering, aggregation,
+    KPI preparation, reporting tables, and curated outputs.
 
-The plan will later be executed by trusted deterministic Python code.
+    Dataset names are logical identifiers, not filesystem paths.
 
-User request:
+    Args:
+        source_dataset_name:
+            Existing Silver dataset name.
 
-{user_question}
+        user_question:
+            Curation or analytical transformation requested.
 
+        target_dataset_name:
+            Optional Gold dataset name.
 
-Dataset metadata:
+        output_format:
+            csv, json, or parquet.
+    """
 
-{dataset_context}
+    etl_tools = ETLTools()
 
-
-Important rules:
-
-- Never generate Python code.
-- Never generate shell commands.
-- Never attempt file-system operations.
-- Never invent column names.
-- Only use columns present in the dataset metadata.
-- Use the minimum number of transformation operations needed.
-- Preserve columns unless the user explicitly requests otherwise.
-- Operations are executed in the exact order you provide them.
-- If type conversion is required before a comparison or aggregation,
-  place the cast operation before that operation.
-- The summary should briefly describe the transformation.
-"""
-
-    plan = planner_llm.invoke(
-        prompt
+    dataset_context = (
+        etl_tools.get_layer_dataset_context(
+            layer=DataLayer.SILVER,
+            dataset_name=source_dataset_name,
+        )
     )
 
-    return etl_tools.transform_load(
-        input_file_path=input_file_path,
-        output_folder=output_folder,
-        output_format=output_format,
-        plan=plan,
+    plan = create_transform_plan(
+        user_question=user_question,
+        dataset_context=dataset_context,
     )
 
+    return (
+        etl_tools
+        .transform_silver_to_gold(
+            source_dataset_name=(
+                source_dataset_name
+            ),
+            target_dataset_name=(
+                target_dataset_name
+            ),
+            output_format=(
+                output_format
+            ),
+            plan=plan,
+        )
+    )
 
 # ============================================================
 # TOOLKIT
@@ -248,7 +335,8 @@ Important rules:
 
 tools = [
     extract_load_tool,
-    transform_load_tool,
+    bronze_to_silver_tool,
+    silver_to_gold_tool,
 ]
 
 tools_by_name = {
@@ -283,69 +371,69 @@ def llm_node(state: ETLAgentSchema):
     """
 
     system_prompt = """
-You are an ETL specialist agent operating inside a larger
-Data Engineer agent.
+    You are an ETL specialist agent operating inside a larger
+    Data Engineer agent.
 
-Your responsibility is to perform ETL-related tasks.
+    You orchestrate a Medallion data architecture:
 
-You have access to two tools:
+    External API
+        ↓
+    Bronze
+        ↓
+    Silver
+        ↓
+    Gold
 
-1. extract_load_tool
+    You have three tools:
 
-    Use this when the user wants to extract data from an API
-    and save it locally. The tool also supports persistent incremental
-    ingestion when the API exposes a known watermark mechanism.
+    1. extract_load_tool
 
-2. transform_load_tool
+    Extract API data into the Bronze layer.
 
-   Use this when the user wants to clean, filter, aggregate,
-   reshape, transform, or otherwise modify an existing dataset.
+    2. bronze_to_silver_tool
 
-Rules:
+    Clean, normalize, deduplicate, cast, filter, or otherwise
+    standardize an existing Bronze dataset into Silver.
 
-- Use the appropriate tool whenever the task requires an ETL operation.
-- Do not claim an operation succeeded unless a tool actually executed it.
-- API extractions always land in the Bronze data layer. 
-- If the user does not specify a dataset name, use: 
-    extract 
-- A datsaset name is a logical identifier, not a filesystem path. 
-- never choose or invent a Bronze output path. 
-  Deterministic code controls the physical Bronze location. 
-- Do not include "data/", "bronze/", or path separators in a dataset name.
-- If the user does not specify a transformation folder, use:
-  data/transform
-- If the user does not specify an output format, use:
-  csv
-- After the required tool operations are completed, provide a short,
-  clear summary of what was done.
-- Do not expose unnecessary implementation details.
+    3. silver_to_gold_tool
 
-Incremental API ingestion rules:
+    Create analytics-ready or business-ready Gold datasets
+    from Silver. Use this for aggregations, KPIs, reporting
+    tables, and curated analytical outputs.
 
-- Use normal full extraction unless incremental ingestion is
-  explicitly requested or the API's incremental contract is known.
 
-- Incremental ingestion requires ALL of:
-  1. a stable state_key
-  2. the API's watermark query parameter
-  3. the corresponding watermark field in returned records
+    Rules:
 
-- Never invent watermark_param or watermark_field.
+    - Never invent filesystem paths.
+    - Never provide "data/", "bronze/", "silver/", or "gold/"
+    as part of a dataset name.
+    - Dataset names are logical identifiers only.
+    - API extraction always writes to Bronze.
+    - Silver must be created from Bronze.
+    - Gold must be created from Silver.
+    - Never bypass Silver by creating Gold directly from Bronze.
+    - Never modify Bronze while producing Silver.
+    - Never modify Silver while producing Gold.
+    - Do not claim an operation succeeded unless its tool succeeded.
+    - Use csv when no output format is specified.
 
-- If the required incremental fields are unknown, do not guess them.
+    Multi-stage requests:
 
-- Never provide or invent a previous cursor/watermark value.
-  Checkpoint values are loaded internally by deterministic code.
+    When a user request requires several Medallion stages,
+    perform them in dependency order:
 
-- Reuse the exact same state_key for subsequent runs of the same
-  incremental ingestion pipeline.
+    1. extract API data to Bronze
+    2. transform Bronze to Silver
+    3. curate Silver to Gold
 
-- A state_key must not be reused for a different API or different
-  watermark configuration.
+    Do not skip required stages.
 
-- The checkpoint is application-controlled. Do not attempt to read,
-  modify, reset, or expose checkpoint files directly.
+    After each stage succeeds, continue to the next required stage.
 
+    Reuse the correct logical dataset names between stages.
+
+    If an earlier stage fails, do not continue to downstream stages.
+    Explain the failure instead.
 """
 
     conversation = [

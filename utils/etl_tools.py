@@ -2751,3 +2751,42 @@ class ETLTools:
             f"Metadata: {metadata_file}\n"
             f"Plan summary: {plan.summary}"
         )
+
+
+# using this function the physical path remains completely application-controlled. 
+def get_layer_dataset_context(
+    self,
+    *,
+    layer: DataLayer,
+    dataset_name: str,
+) -> str:
+    """
+    Return planner-safe context for a deterministic
+    medallion-layer dataset.
+    """
+
+    if layer == DataLayer.BRONZE:
+        file_stem = "extracted_data"
+
+    elif layer == DataLayer.SILVER:
+        file_stem = "transformed_data"
+
+    elif layer == DataLayer.GOLD:
+        file_stem = "curated_data"
+
+    else:
+        raise DatasetError(
+            f"Unsupported data layer: {layer}"
+        )
+
+    dataset_file = (
+        self._resolve_layer_dataset_file(
+            layer=layer,
+            dataset_name=dataset_name,
+            file_stem=file_stem,
+        )
+    )
+
+    return self.get_dataset_context(
+        str(dataset_file)
+    )
