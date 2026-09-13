@@ -410,22 +410,10 @@ The project deliberately treats LLM output as **untrusted input**.
 LLM → typed TransformPlan → deterministic Pandas operations
 ```
 
-rather than:
-
-```text
-LLM → generated Python → exec()
-```
-
 ### SQL
 
 ```text
 LLM → SQL → AST validation → read-only DB transaction
-```
-
-rather than:
-
-```text
-LLM → SQL → direct execution
 ```
 
 This architecture is intended to make agentic data workflows easier to reason about, test, and secure.
