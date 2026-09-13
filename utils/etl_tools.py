@@ -2524,4 +2524,230 @@ class ETLTools:
         )
 
 
-    
+
+    def transform_silver_to_gold(
+        self,
+        source_dataset_name: str,
+        plan: TransformPlan,
+        target_dataset_name: str | None = None,
+        output_format: str = "csv",
+    ) -> str:
+        """
+        Transform a Silver dataset into a deterministic Gold dataset.
+
+        Gold datasets are curated, analytics-ready outputs derived
+        exclusively from Silver datasets.
+
+        The validated TransformPlan may intentionally filter,
+        aggregate, select, rename, or otherwise reshape the data.
+        """
+
+        source_name = (
+            validate_dataset_name(
+                source_dataset_name
+            )
+        )
+
+        target_name = (
+            validate_dataset_name(
+                target_dataset_name
+                if target_dataset_name
+                is not None
+                else source_name
+            )
+        )
+
+        file_format = (
+            self._validate_format(
+                output_format
+            )
+        )
+
+        # ============================================================
+        # RESOLVE SILVER SOURCE
+        # ============================================================
+
+        source_file = (
+            self._resolve_layer_dataset_file(
+                layer=DataLayer.SILVER,
+                dataset_name=source_name,
+                file_stem="transformed_data",
+            )
+        )
+
+        source_dataframe = (
+            self._load_dataframe(
+                str(source_file)
+            )
+        )
+
+        original_rows = len(
+            source_dataframe
+        )
+
+        original_columns = list(
+            source_dataframe.columns
+        )
+
+        source_schema = (
+            dataframe_schema(
+                source_dataframe
+            )
+        )
+
+        source_schema_fingerprint = (
+            schema_fingerprint(
+                source_schema
+            )
+        )
+
+        # ============================================================
+        # APPLY DETERMINISTIC CURATION
+        # ============================================================
+
+        curated = (
+            self.apply_transform_plan(
+                source_dataframe,
+                plan,
+            )
+        )
+
+        output_schema = (
+            dataframe_schema(
+                curated
+            )
+        )
+
+        output_schema_fingerprint = (
+            schema_fingerprint(
+                output_schema
+            )
+        )
+
+        # ============================================================
+        # GOLD DESTINATION
+        # ============================================================
+
+        output_directory = (
+            resolve_layer_dataset_directory(
+                data_root=self.data_root,
+                layer=DataLayer.GOLD,
+                dataset_name=target_name,
+            )
+        )
+
+        output_file = (
+            output_directory
+            / (
+                "curated_data."
+                f"{file_format}"
+            )
+        )
+
+        metadata_file = (
+            output_directory
+            / "curation_metadata.json"
+        )
+
+        # ============================================================
+        # DURABLE GOLD SAVE
+        # ============================================================
+
+        self._save_dataframe_atomic(
+            dataframe=curated,
+            file_path=output_file,
+            file_format=file_format,
+        )
+
+        # ============================================================
+        # GOLD METADATA
+        # ============================================================
+
+        metadata = {
+            "metadata_version": 1,
+            "curated_at": (
+                datetime.now(
+                    timezone.utc
+                ).isoformat()
+            ),
+            "source_dataset": (
+                source_name
+            ),
+            "source_layer": (
+                DataLayer.SILVER.value
+            ),
+            "source_file": str(
+                source_file
+            ),
+            "source_schema": (
+                source_schema
+            ),
+            "source_schema_fingerprint": (
+                source_schema_fingerprint
+            ),
+            "target_dataset": (
+                target_name
+            ),
+            "target_layer": (
+                DataLayer.GOLD.value
+            ),
+            "output_file": str(
+                output_file
+            ),
+            "output_format": (
+                file_format
+            ),
+            "input_rows": (
+                original_rows
+            ),
+            "output_rows": len(
+                curated
+            ),
+            "input_columns": (
+                original_columns
+            ),
+            "output_columns": list(
+                curated.columns
+            ),
+            "output_schema": (
+                output_schema
+            ),
+            "output_schema_fingerprint": (
+                output_schema_fingerprint
+            ),
+            "curation_plan": (
+                plan.model_dump(
+                    mode="json"
+                )
+            ),
+        }
+
+        self._save_json_atomic(
+            payload=metadata,
+            file_path=metadata_file,
+        )
+
+        # ============================================================
+        # RESULT
+        # ============================================================
+
+        return (
+            "Silver-to-Gold curation "
+            "completed successfully.\n"
+            f"Source dataset: {source_name}\n"
+            f"Source layer: "
+            f"{DataLayer.SILVER.value}\n"
+            f"Target dataset: {target_name}\n"
+            f"Target layer: "
+            f"{DataLayer.GOLD.value}\n"
+            f"Input rows: {original_rows}\n"
+            f"Output rows: "
+            f"{len(curated)}\n"
+            f"Output columns: "
+            f"{list(curated.columns)}\n"
+            f"Output schema fingerprint: "
+            f"{output_schema_fingerprint}\n"
+            f"Output file: {output_file}\n"
+            f"Metadata: {metadata_file}\n"
+            f"Plan summary: {plan.summary}"
+        )

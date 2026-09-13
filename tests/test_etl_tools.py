@@ -4,14 +4,17 @@ import pandas as pd
 import pytest
 
 from models.schema import (
+    AggregationSpec,
     DropDuplicatesOperation,
     FilterRowsOperation,
+    GroupByAggregateOperation,
     RenameColumnsOperation,
     SelectColumnsOperation,
     SortValuesOperation,
     StringTransformOperation,
     TransformPlan,
 )
+
 from utils.api_client import APIExtractionResult
 from utils.exceptions import (
     DatasetError,
@@ -1816,6 +1819,383 @@ def test_silver_metadata_records_layers_and_plan(
             "transformation_plan"
         ]["summary"]
         == "Keep identifiers only."
+    )
+
+
+
+def test_silver_to_gold_aggregation(
+    isolated_etl_tools,
+):
+    silver_file = (
+        isolated_etl_tools.data_root
+        / "silver"
+        / "orders"
+        / "transformed_data.csv"
+    )
+
+    silver = pd.DataFrame(
+        {
+            "order_id": [
+                1,
+                2,
+                3,
+                4,
+            ],
+            "country": [
+                "IT",
+                "IT",
+                "FR",
+                "FR",
+            ],
+            "revenue": [
+                100.0,
+                150.0,
+                80.0,
+                120.0,
+            ],
+        }
+    )
+
+    isolated_etl_tools._save_dataframe(
+        dataframe=silver,
+        file_path=silver_file,
+        file_format="csv",
+    )
+
+    plan = TransformPlan(
+        operations=[
+            GroupByAggregateOperation(
+                type="groupby_aggregate",
+                group_by=[
+                    "country"
+                ],
+                aggregations=[
+                    AggregationSpec(
+                        column="revenue",
+                        function="sum",
+                        alias=(
+                            "total_revenue"
+                        ),
+                    ),
+                    AggregationSpec(
+                        column="order_id",
+                        function="count",
+                        alias=(
+                            "order_count"
+                        ),
+                    ),
+                ],
+            )
+        ],
+        summary=(
+            "Aggregate revenue and orders "
+            "by country."
+        ),
+    )
+
+    result = (
+        isolated_etl_tools
+        .transform_silver_to_gold(
+            source_dataset_name="orders",
+            target_dataset_name=(
+                "sales_by_country"
+            ),
+            plan=plan,
+            output_format="csv",
+        )
+    )
+
+    gold_file = (
+        isolated_etl_tools.data_root
+        / "gold"
+        / "sales_by_country"
+        / "curated_data.csv"
+    )
+
+    assert gold_file.exists()
+
+    gold = pd.read_csv(
+        gold_file
+    )
+
+    assert list(
+        gold.columns
+    ) == [
+        "country",
+        "total_revenue",
+        "order_count",
+    ]
+
+    italy = (
+        gold.loc[
+            gold["country"] == "IT"
+        ]
+        .iloc[0]
+    )
+
+    france = (
+        gold.loc[
+            gold["country"] == "FR"
+        ]
+        .iloc[0]
+    )
+
+    assert (
+        italy["total_revenue"]
+        == 250.0
+    )
+
+    assert (
+        italy["order_count"]
+        == 2
+    )
+
+    assert (
+        france["total_revenue"]
+        == 200.0
+    )
+
+    assert (
+        france["order_count"]
+        == 2
+    )
+
+    assert (
+        "Silver-to-Gold"
+        in result
+    )
+
+
+def test_gold_curation_does_not_modify_silver(
+    isolated_etl_tools,
+):
+    silver_file = (
+        isolated_etl_tools.data_root
+        / "silver"
+        / "orders"
+        / "transformed_data.csv"
+    )
+
+    original = pd.DataFrame(
+        {
+            "id": [
+                1,
+                2,
+            ],
+            "amount": [
+                100,
+                200,
+            ],
+        }
+    )
+
+    isolated_etl_tools._save_dataframe(
+        dataframe=original,
+        file_path=silver_file,
+        file_format="csv",
+    )
+
+    plan = TransformPlan(
+        operations=[
+            SelectColumnsOperation(
+                type="select_columns",
+                columns=["id"],
+            )
+        ]
+    )
+
+    (
+        isolated_etl_tools
+        .transform_silver_to_gold(
+            source_dataset_name="orders",
+            plan=plan,
+        )
+    )
+
+    silver_after = pd.read_csv(
+        silver_file
+    )
+
+    assert list(
+        silver_after.columns
+    ) == [
+        "id",
+        "amount",
+    ]
+
+    assert list(
+        silver_after["amount"]
+    ) == [
+        100,
+        200,
+    ]
+
+
+
+def test_gold_curation_requires_silver_dataset(
+    isolated_etl_tools,
+):
+    plan = TransformPlan(
+        operations=[]
+    )
+
+    with pytest.raises(
+        DatasetError,
+        match="Silver dataset does not exist",
+    ):
+        (
+            isolated_etl_tools
+            .transform_silver_to_gold(
+                source_dataset_name="orders",
+                plan=plan,
+            )
+        )
+
+
+
+def test_multiple_silver_formats_are_rejected(
+    isolated_etl_tools,
+):
+    silver_directory = (
+        isolated_etl_tools.data_root
+        / "silver"
+        / "orders"
+    )
+
+    dataframe = pd.DataFrame(
+        {
+            "id": [1]
+        }
+    )
+
+    isolated_etl_tools._save_dataframe(
+        dataframe=dataframe,
+        file_path=(
+            silver_directory
+            / "transformed_data.csv"
+        ),
+        file_format="csv",
+    )
+
+    isolated_etl_tools._save_dataframe(
+        dataframe=dataframe,
+        file_path=(
+            silver_directory
+            / "transformed_data.json"
+        ),
+        file_format="json",
+    )
+
+    plan = TransformPlan(
+        operations=[]
+    )
+
+    with pytest.raises(
+        DatasetError,
+        match="Multiple physical files",
+    ):
+        (
+            isolated_etl_tools
+            .transform_silver_to_gold(
+                source_dataset_name="orders",
+                plan=plan,
+            )
+        )
+
+
+
+def test_gold_metadata_records_layers_and_plan(
+    isolated_etl_tools,
+):
+    silver_file = (
+        isolated_etl_tools.data_root
+        / "silver"
+        / "orders"
+        / "transformed_data.csv"
+    )
+
+    dataframe = pd.DataFrame(
+        {
+            "id": [1],
+            "amount": [100],
+        }
+    )
+
+    isolated_etl_tools._save_dataframe(
+        dataframe=dataframe,
+        file_path=silver_file,
+        file_format="csv",
+    )
+
+    plan = TransformPlan(
+        operations=[
+            SelectColumnsOperation(
+                type="select_columns",
+                columns=[
+                    "amount"
+                ],
+            )
+        ],
+        summary=(
+            "Create analytics-ready "
+            "amount dataset."
+        ),
+    )
+
+    (
+        isolated_etl_tools
+        .transform_silver_to_gold(
+            source_dataset_name="orders",
+            target_dataset_name=(
+                "order_amounts"
+            ),
+            plan=plan,
+        )
+    )
+
+    metadata_file = (
+        isolated_etl_tools.data_root
+        / "gold"
+        / "order_amounts"
+        / "curation_metadata.json"
+    )
+
+    with metadata_file.open(
+        "r",
+        encoding="utf-8",
+    ) as file:
+        metadata = json.load(
+            file
+        )
+
+    assert (
+        metadata["source_layer"]
+        == "silver"
+    )
+
+    assert (
+        metadata["target_layer"]
+        == "gold"
+    )
+
+    assert (
+        metadata["source_dataset"]
+        == "orders"
+    )
+
+    assert (
+        metadata["target_dataset"]
+        == "order_amounts"
+    )
+
+    assert (
+        metadata[
+            "curation_plan"
+        ]["summary"]
+        == (
+            "Create analytics-ready "
+            "amount dataset."
+        )
     )
 
 
