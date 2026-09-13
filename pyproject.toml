@@ -21,3 +21,8 @@ dependencies = [
     "requests>=2.32.0",
     "sqlglot>=30.18.0",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
