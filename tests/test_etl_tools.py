@@ -2200,3 +2200,338 @@ def test_gold_metadata_records_layers_and_plan(
 
 
 
+# ====================== FULL INTEGRATION TEST ==========================
+def test_full_medallion_lineage_chain(
+    isolated_etl_tools,
+    monkeypatch,
+):
+    # ============================================================
+    # BRONZE
+    # ============================================================
+
+    fake_result = APIExtractionResult(
+        records=[
+            {
+                "id": 1,
+                "country": "IT",
+                "revenue": 100.0,
+            },
+            {
+                "id": 2,
+                "country": "IT",
+                "revenue": 150.0,
+            },
+            {
+                "id": 3,
+                "country": "FR",
+                "revenue": 200.0,
+            },
+        ],
+        metadata={
+            "pages_fetched": 1,
+            "records_extracted": 3,
+            "bytes_downloaded": 100,
+            "next_watermark": None,
+        },
+    )
+
+    monkeypatch.setattr(
+        isolated_etl_tools.api_client,
+        "extract_records",
+        lambda *args, **kwargs: (
+            fake_result
+        ),
+    )
+
+    isolated_etl_tools.extract_load(
+        url="https://example.com/orders",
+        dataset_name="orders",
+        format="csv",
+    )
+
+    # ============================================================
+    # SILVER
+    # ============================================================
+
+    silver_plan = TransformPlan(
+        operations=[
+            SelectColumnsOperation(
+                type="select_columns",
+                columns=[
+                    "id",
+                    "country",
+                    "revenue",
+                ],
+            )
+        ],
+        summary="Prepare clean orders.",
+    )
+
+    (
+        isolated_etl_tools
+        .transform_bronze_to_silver(
+            source_dataset_name="orders",
+            target_dataset_name="clean_orders",
+            plan=silver_plan,
+            output_format="csv",
+        )
+    )
+
+    # ============================================================
+    # GOLD
+    # ============================================================
+
+    gold_plan = TransformPlan(
+        operations=[
+            GroupByAggregateOperation(
+                type="groupby_aggregate",
+                group_by=[
+                    "country",
+                ],
+                aggregations=[
+                    AggregationSpec(
+                        column="revenue",
+                        function="sum",
+                        alias="total_revenue",
+                    )
+                ],
+            )
+        ],
+        summary=(
+            "Calculate total revenue "
+            "by country."
+        ),
+    )
+
+    (
+        isolated_etl_tools
+        .transform_silver_to_gold(
+            source_dataset_name=(
+                "clean_orders"
+            ),
+            target_dataset_name=(
+                "revenue_by_country"
+            ),
+            plan=gold_plan,
+            output_format="csv",
+        )
+    )
+
+    # ============================================================
+    # VERIFY LINEAGE
+    # ============================================================
+
+    events = (
+        isolated_etl_tools
+        .lineage_store
+        .get_events()
+    )
+
+    assert len(events) == 3
+
+    # API -> Bronze
+    assert (
+        events[0]["operation"]
+        == "extract"
+    )
+
+    assert (
+        events[0]["source"]["type"]
+        == "api"
+    )
+
+    assert (
+        events[0]["target"]["layer"]
+        == "bronze"
+    )
+
+    assert (
+        events[0]["target"]["dataset"]
+        == "orders"
+    )
+
+    # Bronze -> Silver
+    assert (
+        events[1]["operation"]
+        == "transform"
+    )
+
+    assert (
+        events[1]["source"]["layer"]
+        == "bronze"
+    )
+
+    assert (
+        events[1]["source"]["dataset"]
+        == "orders"
+    )
+
+    assert (
+        events[1]["target"]["layer"]
+        == "silver"
+    )
+
+    assert (
+        events[1]["target"]["dataset"]
+        == "clean_orders"
+    )
+
+    # Silver -> Gold
+    assert (
+        events[2]["operation"]
+        == "curate"
+    )
+
+    assert (
+        events[2]["source"]["layer"]
+        == "silver"
+    )
+
+    assert (
+        events[2]["source"]["dataset"]
+        == "clean_orders"
+    )
+
+    assert (
+        events[2]["target"]["layer"]
+        == "gold"
+    )
+
+    assert (
+        events[2]["target"]["dataset"]
+        == "revenue_by_country"
+    )
+
+
+# =================== no checkpoint advancement without lineage save =======================
+def test_checkpoint_does_not_advance_when_lineage_fails(
+    isolated_etl_tools,
+    monkeypatch,
+):
+    # ============================================================
+    # EXISTING BRONZE DATASET
+    # ============================================================
+
+    existing_file = (
+        isolated_etl_tools.data_root
+        / "bronze"
+        / "orders"
+        / "extracted_data.csv"
+    )
+
+    existing = pd.DataFrame(
+        {
+            "id": [100],
+            "name": ["existing"],
+        }
+    )
+
+    isolated_etl_tools._save_dataframe(
+        dataframe=existing,
+        file_path=existing_file,
+        file_format="csv",
+    )
+
+    # ============================================================
+    # EXISTING CHECKPOINT
+    # ============================================================
+
+    store = IncrementalStateStore(
+        isolated_etl_tools.data_root
+    )
+
+    store.save(
+        "orders",
+        cursor_value=100,
+        metadata={
+            "source_url": (
+                "https://example.com/orders"
+            ),
+            "watermark_param": (
+                "after_id"
+            ),
+            "watermark_field": "id",
+            "dataset_name": "orders",
+            "data_layer": "bronze",
+            "output_file": str(
+                existing_file
+            ),
+        },
+    )
+
+    # ============================================================
+    # NEW API BATCH
+    # ============================================================
+
+    fake_result = APIExtractionResult(
+        records=[
+            {
+                "id": 101,
+                "name": "new",
+            }
+        ],
+        metadata={
+            "pages_fetched": 1,
+            "records_extracted": 1,
+            "bytes_downloaded": 10,
+            "next_watermark": 101,
+        },
+    )
+
+    monkeypatch.setattr(
+        isolated_etl_tools.api_client,
+        "extract_records",
+        lambda *args, **kwargs: (
+            fake_result
+        ),
+    )
+
+    # ============================================================
+    # FORCE LINEAGE FAILURE
+    # ============================================================
+
+    def fail_lineage(
+        *args,
+        **kwargs,
+    ):
+        raise DatasetError(
+            "lineage failed"
+        )
+
+    monkeypatch.setattr(
+        isolated_etl_tools.lineage_store,
+        "record_extraction",
+        fail_lineage,
+    )
+
+    # ============================================================
+    # RUN INGESTION
+    # ============================================================
+
+    with pytest.raises(
+        DatasetError,
+        match="lineage failed",
+    ):
+        isolated_etl_tools.extract_load(
+            url=(
+                "https://example.com/orders"
+            ),
+            dataset_name="orders",
+            format="csv",
+            state_key="orders",
+            watermark_param="after_id",
+            watermark_field="id",
+        )
+
+    # ============================================================
+    # CHECKPOINT MUST NOT MOVE
+    # ============================================================
+
+    state = store.load(
+        "orders"
+    )
+
+    assert (
+        state["cursor_value"]
+        == 100
+    )

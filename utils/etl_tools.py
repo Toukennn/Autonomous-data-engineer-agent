@@ -40,6 +40,7 @@ from utils.data_layers import (
     validate_dataset_name,
 )
 
+from utils.lineage import LineageStore
 
 class ETLTools:
     """
@@ -75,6 +76,12 @@ class ETLTools:
         self.data_root = settings.data_root
 
         self.api_client = APIClient()
+
+        self.lineage_store = (
+            LineageStore(
+                self.data_root
+            )
+        )
 
     # ============================================================
     # PATH SAFETY
@@ -1397,6 +1404,26 @@ class ETLTools:
         )
 
         # ============================================================
+        # LINEAGE
+        # ============================================================
+
+        lineage_event_id = (
+            self.lineage_store
+            .record_extraction(
+                source_url=url,
+                target_dataset=(
+                    safe_dataset_name
+                ),
+                target_schema_fingerprint=(
+                    current_schema_fingerprint
+                ),
+                output_format=(
+                    file_format
+                ),
+            )
+        )
+
+        # ============================================================
         # CHECKPOINT COMMIT
         # ============================================================
         #
@@ -1478,6 +1505,7 @@ class ETLTools:
             f"{safe_dataset_name}"
             f"\nData layer: "
             f"{DataLayer.BRONZE.value}"
+            f"\nLineage event: {lineage_event_id}"
         )
 
         if incremental_enabled:
@@ -2498,6 +2526,43 @@ class ETLTools:
             file_path=metadata_file,
         )
 
+        plan_payload = (
+            plan.model_dump(
+                mode="json"
+            )
+        )
+
+        lineage_event_id = (
+            self.lineage_store
+            .record_transition(
+                operation="transform",
+                source_layer=(
+                    DataLayer.BRONZE
+                ),
+                source_dataset=(
+                    source_name
+                ),
+                source_schema_fingerprint=(
+                    source_schema_fingerprint
+                ),
+                target_layer=(
+                    DataLayer.SILVER
+                ),
+                target_dataset=(
+                    target_name
+                ),
+                target_schema_fingerprint=(
+                    output_schema_fingerprint
+                ),
+                plan_payload=(
+                    plan_payload
+                ),
+                output_format=(
+                    file_format
+                ),
+            )
+        )
+
         # ============================================================
         # RESULT
         # ============================================================
@@ -2521,6 +2586,7 @@ class ETLTools:
             f"Output file: {output_file}\n"
             f"Metadata: {metadata_file}\n"
             f"Plan summary: {plan.summary}"
+            f"\nLineage event: {lineage_event_id}"
         )
 
 
@@ -2727,6 +2793,43 @@ class ETLTools:
             file_path=metadata_file,
         )
 
+        plan_payload = (
+            plan.model_dump(
+                mode="json"
+            )
+        )
+
+        lineage_event_id = (
+            self.lineage_store
+            .record_transition(
+                operation="curate",
+                source_layer=(
+                    DataLayer.SILVER
+                ),
+                source_dataset=(
+                    source_name
+                ),
+                source_schema_fingerprint=(
+                    source_schema_fingerprint
+                ),
+                target_layer=(
+                    DataLayer.GOLD
+                ),
+                target_dataset=(
+                    target_name
+                ),
+                target_schema_fingerprint=(
+                    output_schema_fingerprint
+                ),
+                plan_payload=(
+                    plan_payload
+                ),
+                output_format=(
+                    file_format
+                ),
+            )
+        )
+
         # ============================================================
         # RESULT
         # ============================================================
@@ -2750,6 +2853,8 @@ class ETLTools:
             f"Output file: {output_file}\n"
             f"Metadata: {metadata_file}\n"
             f"Plan summary: {plan.summary}"
+            f"\nLineage event: {lineage_event_id}"
+            f"{lineage_event_id}"
         )
 
 
