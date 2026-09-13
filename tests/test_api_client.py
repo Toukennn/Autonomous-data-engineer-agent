@@ -6,6 +6,7 @@ from pydantic import SecretStr
 from utils.api_client import APIClient
 from utils.exceptions import ExternalAPIError
 
+from urllib.parse import parse_qs, urlparse
 
 @pytest.fixture
 def api_client():
@@ -852,4 +853,291 @@ def test_authenticated_cross_origin_pagination_is_rejected(
         api_client.extract_records(
             "https://example.com/api",
             use_auth=True,
+        )
+
+def test_incremental_watermark_is_added_to_initial_url(
+    api_client,
+    monkeypatch,
+):
+    visited_urls = []
+
+    def fake_request(
+        url,
+        headers,
+    ):
+        visited_urls.append(
+            url
+        )
+
+        return (
+            {
+                "results": [
+                    {
+                        "id": 101
+                    },
+                    {
+                        "id": 102
+                    },
+                ],
+                "next": None,
+            },
+            20,
+        )
+
+    monkeypatch.setattr(
+        api_client,
+        "_request_json",
+        fake_request,
+    )
+
+    result = api_client.extract_records(
+        "https://example.com/orders",
+        watermark_param="after_id",
+        watermark_field="id",
+        watermark_value=100,
+    )
+
+    parsed = urlparse(
+        visited_urls[0]
+    )
+
+    query = parse_qs(
+        parsed.query
+    )
+
+    assert (
+        query["after_id"]
+        == ["100"]
+    )
+
+    assert (
+        result.metadata["previous_watermark"]
+        == 100
+    )
+
+    assert (
+        result.metadata["next_watermark"]
+        == 102
+    )
+
+
+def test_first_incremental_run_has_no_filter(
+    api_client,
+    monkeypatch,
+):
+    visited_urls = []
+
+    def fake_request(
+        url,
+        headers,
+    ):
+        visited_urls.append(
+            url
+        )
+
+        return (
+            {
+                "results": [
+                    {
+                        "id": 10
+                    }
+                ],
+                "next": None,
+            },
+            10,
+        )
+
+    monkeypatch.setattr(
+        api_client,
+        "_request_json",
+        fake_request,
+    )
+
+    result = api_client.extract_records(
+        "https://example.com/orders",
+        watermark_param="after_id",
+        watermark_field="id",
+        watermark_value=None,
+    )
+
+    parsed = urlparse(
+        visited_urls[0]
+    )
+
+    assert (
+        "after_id"
+        not in parse_qs(
+            parsed.query
+        )
+    )
+
+    assert (
+        result.metadata["next_watermark"]
+        == 10
+    )
+
+
+def test_no_new_records_preserves_watermark(
+    api_client,
+    monkeypatch,
+):
+    def fake_request(
+        url,
+        headers,
+    ):
+        return (
+            {
+                "results": [],
+                "next": None,
+            },
+            10,
+        )
+
+    monkeypatch.setattr(
+        api_client,
+        "_request_json",
+        fake_request,
+    )
+
+    result = api_client.extract_records(
+        "https://example.com/orders",
+        watermark_param="after_id",
+        watermark_field="id",
+        watermark_value=500,
+    )
+
+    assert (
+        result.metadata["next_watermark"]
+        == 500
+    )
+
+
+def test_missing_watermark_field_is_rejected(
+    api_client,
+    monkeypatch,
+):
+    def fake_request(
+        url,
+        headers,
+    ):
+        return (
+            {
+                "results": [
+                    {
+                        "name": "order"
+                    }
+                ],
+                "next": None,
+            },
+            10,
+        )
+
+    monkeypatch.setattr(
+        api_client,
+        "_request_json",
+        fake_request,
+    )
+
+    with pytest.raises(
+        ExternalAPIError,
+        match="watermark field",
+    ):
+        api_client.extract_records(
+            "https://example.com/orders",
+            watermark_param="after_id",
+            watermark_field="id",
+            watermark_value=100,
+        )
+
+
+def test_mixed_watermark_types_are_rejected(
+    api_client,
+    monkeypatch,
+):
+    def fake_request(
+        url,
+        headers,
+    ):
+        return (
+            {
+                "results": [
+                    {
+                        "id": 101
+                    },
+                    {
+                        "id": "102"
+                    },
+                ],
+                "next": None,
+            },
+            10,
+        )
+
+    monkeypatch.setattr(
+        api_client,
+        "_request_json",
+        fake_request,
+    )
+
+    with pytest.raises(
+        ExternalAPIError,
+        match="consistent type",
+    ):
+        api_client.extract_records(
+            "https://example.com/orders",
+            watermark_param="after_id",
+            watermark_field="id",
+            watermark_value=100,
+        )
+
+
+def test_watermark_regression_is_rejected(
+    api_client,
+    monkeypatch,
+):
+    def fake_request(
+        url,
+        headers,
+    ):
+        return (
+            {
+                "results": [
+                    {
+                        "id": 99
+                    }
+                ],
+                "next": None,
+            },
+            10,
+        )
+
+    monkeypatch.setattr(
+        api_client,
+        "_request_json",
+        fake_request,
+    )
+
+    with pytest.raises(
+        ExternalAPIError,
+        match="moved backwards",
+    ):
+        api_client.extract_records(
+            "https://example.com/orders",
+            watermark_param="after_id",
+            watermark_field="id",
+            watermark_value=100,
+        )
+
+
+def test_incomplete_incremental_configuration_is_rejected(
+    api_client,
+):
+    with pytest.raises(
+        ExternalAPIError,
+        match="watermark field",
+    ):
+        api_client.extract_records(
+            "https://example.com/orders",
+            watermark_param="after_id",
+            watermark_value=100,
         )

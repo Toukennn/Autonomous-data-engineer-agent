@@ -3,7 +3,12 @@ import socket
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import (
+    parse_qsl,
+    urlencode,
+    urljoin,
+    urlparse,
+)
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -396,6 +401,226 @@ class APIClient:
 
         return current
 
+    @staticmethod
+    def _add_query_parameter(
+        url: str,
+        name: str,
+        value: str | int | float,
+    ) -> str:
+        """
+        Add or replace one query parameter in a URL.
+
+        Existing query parameters are preserved.
+        """
+
+        if not name.strip():
+            raise ExternalAPIError(
+                "Incremental API parameter name cannot be empty."
+            )
+
+        parsed = urlparse(
+            url
+        )
+
+        query_parameters = parse_qsl(
+            parsed.query,
+            keep_blank_values=True,
+        )
+
+        # Remove an existing copy of the same parameter.
+        query_parameters = [
+            (
+                parameter_name,
+                parameter_value,
+            )
+            for (
+                parameter_name,
+                parameter_value,
+            )
+            in query_parameters
+            if parameter_name != name
+        ]
+
+        query_parameters.append(
+            (
+                name,
+                str(value),
+            )
+        )
+
+        query = urlencode(
+            query_parameters
+        )
+
+        return parsed._replace(
+            query=query
+        ).geturl()
+
+
+    def _calculate_next_watermark(
+        self,
+        records: list[dict[str, Any]],
+        watermark_field: str,
+        previous_watermark: (
+            str
+            | int
+            | float
+            | None
+        ),
+    ) -> str | int | float | None:
+        """
+        Calculate the highest watermark contained in extracted records.
+
+        Supported watermark types:
+
+        - integers
+        - floats
+        - strings
+
+        String watermarks should use a naturally sortable format,
+        such as ISO-8601 timestamps.
+        """
+
+        # No new records means the checkpoint must not move.
+        if not records:
+            return previous_watermark
+
+        values: list[
+            str
+            | int
+            | float
+        ] = []
+
+        for record in records:
+
+            value = self._get_nested_value(
+                record,
+                watermark_field,
+            )
+
+            # Every incremental record must have the watermark.
+            # Ignoring missing values could permanently skip records.
+            if value is None:
+                raise ExternalAPIError(
+                    "Incremental record does not contain "
+                    f"watermark field '{watermark_field}'."
+                )
+
+            if isinstance(
+                value,
+                bool,
+            ):
+                raise ExternalAPIError(
+                    "Boolean values cannot be used "
+                    "as incremental watermarks."
+                )
+
+            if not isinstance(
+                value,
+                (
+                    str,
+                    int,
+                    float,
+                ),
+            ):
+                raise ExternalAPIError(
+                    "Incremental watermark values must be "
+                    "strings or numbers."
+                )
+
+            values.append(
+                value
+            )
+
+        numeric_values = all(
+            isinstance(
+                value,
+                (
+                    int,
+                    float,
+                ),
+            )
+            and not isinstance(
+                value,
+                bool,
+            )
+            for value in values
+        )
+
+        string_values = all(
+            isinstance(
+                value,
+                str,
+            )
+            for value in values
+        )
+
+        if not (
+            numeric_values
+            or string_values
+        ):
+            raise ExternalAPIError(
+                "Incremental watermark values must "
+                "have a consistent type."
+            )
+
+        next_watermark = max(
+            values
+        )
+
+        # ------------------------------------------------------------
+        # Prevent checkpoint regression
+        # ------------------------------------------------------------
+
+        if previous_watermark is not None:
+
+            previous_is_numeric = (
+                isinstance(
+                    previous_watermark,
+                    (
+                        int,
+                        float,
+                    ),
+                )
+                and not isinstance(
+                    previous_watermark,
+                    bool,
+                )
+            )
+
+            previous_is_string = isinstance(
+                previous_watermark,
+                str,
+            )
+
+            if (
+                numeric_values
+                and not previous_is_numeric
+            ):
+                raise ExternalAPIError(
+                    "Previous incremental watermark type "
+                    "does not match extracted records."
+                )
+
+            if (
+                string_values
+                and not previous_is_string
+            ):
+                raise ExternalAPIError(
+                    "Previous incremental watermark type "
+                    "does not match extracted records."
+                )
+
+            if (
+                next_watermark
+                < previous_watermark
+            ):
+                raise ExternalAPIError(
+                    "Incremental watermark moved backwards."
+                )
+
+        return next_watermark
+
     # ============================================================
     # REQUEST
     # ============================================================
@@ -675,6 +900,14 @@ class APIClient:
         records_path: str | None = "results",
         next_path: str | None = "next",
         use_auth: bool = False,
+        watermark_param: str | None = None,
+        watermark_field: str | None = None,
+        watermark_value: (
+            str
+            | int
+            | float
+            | None
+        ) = None,
     ) -> APIExtractionResult:
         """
         Extract records from one or more API pages.
@@ -708,6 +941,39 @@ class APIClient:
             url
         )
 
+        # ========================================================
+        # INCREMENTAL INGESTION VALIDATION
+        # ========================================================
+
+        incremental_enabled = any(
+            value is not None
+            for value in (
+                watermark_param,
+                watermark_field,
+                watermark_value,
+            )
+        )
+
+        if incremental_enabled:
+
+            if (
+                watermark_param is None
+                or not watermark_param.strip()
+            ):
+                raise ExternalAPIError(
+                    "Incremental extraction requires "
+                    "a watermark parameter."
+                )
+
+            if (
+                watermark_field is None
+                or not watermark_field.strip()
+            ):
+                raise ExternalAPIError(
+                    "Incremental extraction requires "
+                    "a watermark field."
+                )
+
         # Authenticated API traffic must never use plain HTTP.
         if (
             use_auth
@@ -736,7 +1002,25 @@ class APIClient:
             use_auth=use_auth
         )
 
-        current_url = url
+        # ========================================================
+        # BUILD INITIAL REQUEST URL
+        # ========================================================
+
+        initial_request_url = url
+
+        if (
+            incremental_enabled
+            and watermark_value is not None
+        ):
+            initial_request_url = (
+                self._add_query_parameter(
+                    url=url,
+                    name=watermark_param,
+                    value=watermark_value,
+                )
+            )
+
+        current_url = initial_request_url
 
         visited_urls: set[str] = set()
 
@@ -910,6 +1194,19 @@ class APIClient:
             timezone.utc
         )
 
+        initial_request_url = url
+
+        next_watermark = None
+
+        if incremental_enabled:
+            next_watermark = (
+                self._calculate_next_watermark(
+                    records=all_records,
+                    watermark_field=watermark_field,
+                    previous_watermark=watermark_value,
+                )
+            )
+
         metadata = {
             "source_url": url,
             "pages_fetched": pages_fetched,
@@ -936,6 +1233,21 @@ class APIClient:
             ),
             "completed_at": (
                 completed_at.isoformat()
+            ),
+            "incremental_enabled": (
+                incremental_enabled
+            ),
+            "watermark_param": (
+                watermark_param
+            ),
+            "watermark_field": (
+                watermark_field
+            ),
+            "previous_watermark": (
+                watermark_value
+            ),
+            "next_watermark": (
+                next_watermark
             ),
         }
 
