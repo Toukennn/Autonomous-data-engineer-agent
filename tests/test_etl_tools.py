@@ -667,3 +667,113 @@ def test_incremental_retry_does_not_duplicate_rows(
         101,
         102,
     ]
+
+
+def test_incomplete_incremental_configuration_is_rejected(
+    isolated_etl_tools,
+):
+    with pytest.raises(
+        DatasetError,
+        match="watermark field",
+    ):
+        isolated_etl_tools.extract_load(
+            url="https://example.com/orders",
+            output_folder="data/orders",
+            format="csv",
+            state_key="orders",
+            watermark_param="after_id",
+        )
+
+
+def test_incremental_state_key_cannot_be_reused_for_another_source(
+    isolated_etl_tools,
+):
+    store = IncrementalStateStore(
+        isolated_etl_tools.data_root
+    )
+
+    store.save(
+        "orders",
+        cursor_value=100,
+        metadata={
+            "source_url": (
+                "https://example.com/orders"
+            ),
+            "watermark_param": "after_id",
+            "watermark_field": "id",
+        },
+    )
+
+    with pytest.raises(
+        DatasetError,
+        match="different source_url",
+    ):
+        isolated_etl_tools.extract_load(
+            url="https://other.example.com/orders",
+            output_folder="data/orders",
+            format="csv",
+            state_key="orders",
+            watermark_param="after_id",
+            watermark_field="id",
+        )
+
+
+def test_incremental_checkpoint_is_passed_to_api_client(
+    isolated_etl_tools,
+    monkeypatch,
+):
+    store = IncrementalStateStore(
+        isolated_etl_tools.data_root
+    )
+
+    store.save(
+        "orders",
+        cursor_value=250,
+        metadata={
+            "source_url": (
+                "https://example.com/orders"
+            ),
+            "watermark_param": "after_id",
+            "watermark_field": "id",
+        },
+    )
+
+    captured = {}
+
+    def fake_extract_records(
+        *args,
+        **kwargs,
+    ):
+        captured.update(
+            kwargs
+        )
+
+        return APIExtractionResult(
+            records=[],
+            metadata={
+                "pages_fetched": 1,
+                "records_extracted": 0,
+                "bytes_downloaded": 10,
+                "next_watermark": 250,
+            },
+        )
+
+    monkeypatch.setattr(
+        isolated_etl_tools.api_client,
+        "extract_records",
+        fake_extract_records,
+    )
+
+    isolated_etl_tools.extract_load(
+        url="https://example.com/orders",
+        output_folder="data/orders",
+        format="csv",
+        state_key="orders",
+        watermark_param="after_id",
+        watermark_field="id",
+    )
+
+    assert (
+        captured["watermark_value"]
+        == 250
+    )

@@ -20,61 +20,94 @@ def extract_load_tool(
     records_path: str | None = "results",
     next_path: str | None = "next",
     use_auth: bool = False,
+    state_key: str | None = None,
+    watermark_param: str | None = None,
+    watermark_field: str | None = None,
 ) -> str:
     """
     Extract data from an API endpoint and save it locally.
 
-    Supports resilient paginated API ingestion through APIClient.
+    Supports:
 
-    - API extraction supports automatic pagination.
-    - If records are stored somewhere other than "results",
-    provide the correct records_path.
-    - If pagination uses a field other than "next",
-    provide the correct next_path.
-    - Use authenticated extraction only when the API requires it.
-    - Never request, reveal, or include API credentials in tool arguments.
+    - paginated API extraction
+    - retries and rate-limit handling
+    - authenticated APIs
+    - incremental watermark-based ingestion
+    - deterministic checkpoint persistence
+
+    For normal full extraction, leave:
+
+        state_key=None
+        watermark_param=None
+        watermark_field=None
+
+    For incremental ingestion, all three values are required:
+
+        state_key:
+            Stable identifier for the ingestion pipeline.
+
+        watermark_param:
+            API query parameter used to request only newer records.
+
+            Example:
+                updated_after
+                after_id
+                modified_since
+
+        watermark_field:
+            Field inside each returned record whose maximum value
+            becomes the next checkpoint.
+
+            Example:
+                id
+                updated_at
+                modified_at
+
+    The actual previous watermark value is loaded internally from
+    the checkpoint store and must never be supplied by the LLM.
+
+    Important:
+
+    - Never invent watermark parameters or fields.
+    - Use incremental ingestion only when the API contract or user
+      explicitly identifies the correct incremental parameter and field.
+    - Never expose, request, or pass checkpoint cursor values manually.
+    - Never expose API credentials.
 
     Args:
         url:
-            API endpoint from which data should be extracted.
+            API endpoint.
 
         output_folder:
-            Folder where extracted data should be saved.
-            Defaults to "data/extract".
+            Folder inside the project's data directory.
 
         format:
-            Output format.
-            Supported values: csv, json, parquet.
+            csv, json, or parquet.
 
         paginate:
             Whether pagination should be followed automatically.
 
         records_path:
-            Dotted JSON path containing the records.
-
-            Examples:
-                "results"
-                "data.results"
-
-            Use None for APIs returning a top-level list/object.
+            Dotted path containing API records.
 
         next_path:
-            Dotted JSON path containing the next-page URL.
-
-            Examples:
-                "next"
-                "pagination.next"
+            Dotted path containing the next-page URL.
 
         use_auth:
-            Whether API authentication configured in the
-            environment should be used.
+            Whether configured API authentication should be used.
 
-            The LLM never receives the actual API token.
+        state_key:
+            Stable checkpoint identifier used for incremental ingestion.
+
+        watermark_param:
+            API query parameter representing the previous watermark.
+
+        watermark_field:
+            Record field used to calculate the next watermark.
 
     Returns:
         Description of the extraction and saved files.
     """
-
     etl_tools = ETLTools()
 
     return etl_tools.extract_load(
@@ -85,6 +118,9 @@ def extract_load_tool(
         records_path=records_path,
         next_path=next_path,
         use_auth=use_auth,
+        state_key=state_key,
+        watermark_param=watermark_param,
+        watermark_field=watermark_field,
     )
 
 @tool
@@ -233,8 +269,9 @@ You have access to two tools:
 
 1. extract_load_tool
 
-   Use this when the user wants to extract data from an API
-   and save it locally.
+    Use this when the user wants to extract data from an API
+    and save it locally. The tool also supports persistent incremental
+    ingestion when the API exposes a known watermark mechanism.
 
 2. transform_load_tool
 
@@ -254,6 +291,33 @@ Rules:
 - After the required tool operations are completed, provide a short,
   clear summary of what was done.
 - Do not expose unnecessary implementation details.
+
+Incremental API ingestion rules:
+
+- Use normal full extraction unless incremental ingestion is
+  explicitly requested or the API's incremental contract is known.
+
+- Incremental ingestion requires ALL of:
+  1. a stable state_key
+  2. the API's watermark query parameter
+  3. the corresponding watermark field in returned records
+
+- Never invent watermark_param or watermark_field.
+
+- If the required incremental fields are unknown, do not guess them.
+
+- Never provide or invent a previous cursor/watermark value.
+  Checkpoint values are loaded internally by deterministic code.
+
+- Reuse the exact same state_key for subsequent runs of the same
+  incremental ingestion pipeline.
+
+- A state_key must not be reused for a different API or different
+  watermark configuration.
+
+- The checkpoint is application-controlled. Do not attempt to read,
+  modify, reset, or expose checkpoint files directly.
+
 """
 
     conversation = [
