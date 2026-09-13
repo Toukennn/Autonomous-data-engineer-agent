@@ -16,24 +16,55 @@ def extract_load_tool(
     url: str,
     output_folder: str = "data/extract",
     format: str = "csv",
+    paginate: bool = True,
+    records_path: str | None = "results",
+    next_path: str | None = "next",
+    use_auth: bool = False,
 ) -> str:
     """
     Extract data from an API endpoint and save it locally.
+
+    Supports resilient paginated API ingestion through APIClient.
 
     Args:
         url:
             API endpoint from which data should be extracted.
 
         output_folder:
-            Folder where the extracted data should be saved.
+            Folder where extracted data should be saved.
             Defaults to "data/extract".
 
         format:
             Output format.
             Supported values: csv, json, parquet.
 
+        paginate:
+            Whether pagination should be followed automatically.
+
+        records_path:
+            Dotted JSON path containing the records.
+
+            Examples:
+                "results"
+                "data.results"
+
+            Use None for APIs returning a top-level list/object.
+
+        next_path:
+            Dotted JSON path containing the next-page URL.
+
+            Examples:
+                "next"
+                "pagination.next"
+
+        use_auth:
+            Whether API authentication configured in the
+            environment should be used.
+
+            The LLM never receives the actual API token.
+
     Returns:
-        A message describing whether the extraction succeeded or failed.
+        Description of the extraction and saved files.
     """
 
     etl_tools = ETLTools()
@@ -42,8 +73,11 @@ def extract_load_tool(
         url=url,
         output_folder=output_folder,
         format=format,
+        paginate=paginate,
+        records_path=records_path,
+        next_path=next_path,
+        use_auth=use_auth,
     )
-
 
 @tool
 def transform_load_tool(
