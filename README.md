@@ -24,19 +24,19 @@ The system currently contains three main agents:
       User Request
            │
            ▼
-Data Engineer Router
+  Data Engineer Router
    ┌───────┴────────┐
    ▼                ▼
 ETL Analyst      SQL Analyst
    │                │
    ▼                ▼
-Safe ETL         SQL Validation
-Operations           │
-   │                 ▼
-   ▼           Read-only PostgreSQL
-Data Files            │
-                      ▼
-                 Final Answer
+ Safe ETL      SQL Validation
+Operations          │
+   │                ▼
+   ▼          Read-only PostgreSQL
+Data Files          │
+                    ▼
+                Final Answer
 ```
 
 ---
