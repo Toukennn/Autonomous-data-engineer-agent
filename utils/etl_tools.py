@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 import pandas as pd
-import requests
+from utils.api_client import APIClient
 
 from config.settings import get_runtime_settings
 from models.schema import (
@@ -20,7 +20,6 @@ from models.schema import (
 )
 from utils.exceptions import (
     DatasetError,
-    ExternalAPIError,
     UnsupportedFormatError,
 )
 
@@ -46,7 +45,7 @@ class ETLTools:
 
     def __init__(self):
         """
-        Load runtime configuration.
+        Load runtime configuration and initialize API ingestion.
         """
 
         settings = get_runtime_settings()
@@ -54,13 +53,7 @@ class ETLTools:
         self.project_root = settings.project_root
         self.data_root = settings.data_root
 
-        self.http_timeout = (
-            settings.http_timeout_seconds
-        )
-
-        self.api_max_response_bytes = (
-            settings.api_max_response_bytes
-        )
+        self.api_client = APIClient()
 
     # ============================================================
     # PATH SAFETY
@@ -257,145 +250,97 @@ class ETLTools:
         url: str,
         output_folder: str,
         format: str,
+        paginate: bool = True,
+        records_path: str | None = "results",
+        next_path: str | None = "next",
+        use_auth: bool = False,
     ) -> str:
         """
-        Extract JSON data from an API endpoint and store it locally.
+        Extract records from an API and save them as a dataset.
 
-        Protections include:
+        HTTP communication, retries, pagination, rate-limit handling,
+        authentication, and response-size limits are delegated to
+        APIClient.
 
-        - HTTP timeout
-        - response size limit
-        - output path restriction
-        - supported format validation
+        ETLTools remains responsible for converting extracted records
+        into a DataFrame and storing the result.
+
+        Args:
+            url:
+                API endpoint.
+
+            output_folder:
+                Folder inside the project's data directory.
+
+            format:
+                csv, json, or parquet.
+
+            paginate:
+                Whether pagination should be followed.
+
+            records_path:
+                Dotted JSON path containing the records.
+
+                Example:
+                    "results"
+                    "data.results"
+
+            next_path:
+                Dotted JSON path containing the next-page URL.
+
+                Example:
+                    "next"
+                    "pagination.next"
+
+            use_auth:
+                Whether configured API authentication should be used.
+
+        Returns:
+            Description of the extraction and saved files.
         """
 
-        file_format = (
-            self._validate_format(
-                format
-            )
+        # --------------------------------------------------------
+        # Validate output
+        # --------------------------------------------------------
+
+        file_format = self._validate_format(
+            format
         )
 
-        output_directory = (
-            self._resolve_data_path(
-                output_folder
-            )
+        output_directory = self._resolve_data_path(
+            output_folder
         )
 
-        try:
-            response = requests.get(
-                url,
-                timeout=self.http_timeout,
-            )
-
-            response.raise_for_status()
-
-        except requests.Timeout as exc:
-            raise ExternalAPIError(
-                "API request timed out after "
-                f"{self.http_timeout} seconds."
-            ) from exc
-
-        except requests.RequestException as exc:
-            raise ExternalAPIError(
-                "API extraction request failed."
-            ) from exc
-
         # --------------------------------------------------------
-        # RESPONSE SIZE CHECK
+        # Extract records through APIClient
         # --------------------------------------------------------
 
-        content_length = (
-            response.headers.get(
-                "Content-Length"
-            )
+        result = self.api_client.extract_records(
+            url=url,
+            paginate=paginate,
+            records_path=records_path,
+            next_path=next_path,
+            use_auth=use_auth,
         )
 
-        if content_length is not None:
-
-            try:
-                response_size = int(
-                    content_length
-                )
-
-            except ValueError:
-                response_size = None
-
-            if (
-                response_size is not None
-                and response_size
-                > self.api_max_response_bytes
-            ):
-                raise ExternalAPIError(
-                    "API response exceeds the configured "
-                    "maximum response size."
-                )
-
-        # Fallback in case Content-Length is missing or incorrect
-        if (
-            len(response.content)
-            > self.api_max_response_bytes
-        ):
-            raise ExternalAPIError(
-                "API response exceeds the configured "
-                "maximum response size."
-            )
-
         # --------------------------------------------------------
-        # JSON PARSING
-        # --------------------------------------------------------
-
-        try:
-            payload = response.json()
-
-        except ValueError as exc:
-            raise ExternalAPIError(
-                "API response is not valid JSON."
-            ) from exc
-
-        # --------------------------------------------------------
-        # COMMON API STRUCTURES
-        # --------------------------------------------------------
-
-        if (
-            isinstance(payload, dict)
-            and isinstance(
-                payload.get("results"),
-                list,
-            )
-        ):
-            records = payload["results"]
-
-        elif isinstance(
-            payload,
-            list,
-        ):
-            records = payload
-
-        elif isinstance(
-            payload,
-            dict,
-        ):
-            records = [payload]
-
-        else:
-            raise ExternalAPIError(
-                "API returned an unsupported JSON structure."
-            )
-
-        # --------------------------------------------------------
-        # NORMALIZE
+        # Convert records into tabular data
         # --------------------------------------------------------
 
         try:
             dataframe = pd.json_normalize(
-                records
+                result.records
             )
 
         except Exception as exc:
             raise DatasetError(
-                "Failed to convert API response "
+                "Failed to convert extracted API records "
                 "into a tabular dataset."
             ) from exc
+
+        # --------------------------------------------------------
+        # Save extracted dataset
+        # --------------------------------------------------------
 
         output_file = (
             output_directory
@@ -408,13 +353,53 @@ class ETLTools:
             file_format=file_format,
         )
 
+        # --------------------------------------------------------
+        # Save extraction metadata
+        # --------------------------------------------------------
+
+        metadata_file = (
+            output_directory
+            / "extraction_metadata.json"
+        )
+
+        try:
+            output_directory.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+
+            with metadata_file.open(
+                "w",
+                encoding="utf-8",
+            ) as file:
+                json.dump(
+                    result.metadata,
+                    file,
+                    indent=2,
+                    ensure_ascii=False,
+                )
+
+        except Exception as exc:
+            raise DatasetError(
+                "Extracted data was created, but extraction "
+                "metadata could not be saved."
+            ) from exc
+
+        # --------------------------------------------------------
+        # Result summary
+        # --------------------------------------------------------
+
         return (
             "Data successfully extracted.\n"
             f"Rows: {len(dataframe)}\n"
             f"Columns: {len(dataframe.columns)}\n"
-            f"Output: {output_file}"
+            f"Pages fetched: "
+            f"{result.metadata['pages_fetched']}\n"
+            f"Bytes downloaded: "
+            f"{result.metadata['bytes_downloaded']}\n"
+            f"Dataset: {output_file}\n"
+            f"Metadata: {metadata_file}"
         )
-
     # ============================================================
     # DATASET CONTEXT
     # ============================================================

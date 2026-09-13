@@ -115,6 +115,53 @@ class RuntimeSettings(_BaseAppSettings):
             PROJECT_ROOT / "data"
         ).resolve()
 
+    api_max_total_response_bytes: int = Field(
+        default=100_000_000,
+        ge=1_000,
+    )
+
+    api_max_pages: int = Field(
+        default=50,
+        ge=1,
+        le=10_000,
+    )
+
+    api_max_records: int = Field(
+        default=100_000,
+        ge=1,
+    )
+
+    api_retry_total: int = Field(
+        default=4,
+        ge=0,
+        le=10,
+    )
+
+    api_retry_backoff_seconds: float = Field(
+        default=0.5,
+        ge=0,
+        le=60,
+    )
+
+    api_user_agent: str = Field(
+        default="autonomous-data-engineer-agent/0.1",
+    )
+
+    api_auth_token: SecretStr | None = Field(
+        default=None,
+        validation_alias="API_AUTH_TOKEN",
+    )
+
+    api_auth_header: str = Field(
+        default="Authorization",
+        validation_alias="API_AUTH_HEADER",
+    )
+
+    api_auth_scheme: str = Field(
+        default="Bearer",
+        validation_alias="API_AUTH_SCHEME",
+    )
+
 
 class LLMSettings(_BaseAppSettings):
     """

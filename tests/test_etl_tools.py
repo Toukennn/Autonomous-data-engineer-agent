@@ -1,6 +1,8 @@
 import pandas as pd
 import pytest
-import requests
+
+from utils.api_client import APIExtractionResult
+from utils.exceptions import ExternalAPIError
 
 from models.schema import (
     DropDuplicatesOperation,
@@ -13,7 +15,6 @@ from models.schema import (
 )
 from utils.exceptions import (
     DatasetError,
-    ExternalAPIError,
     UnsupportedFormatError,
 )
 
@@ -337,15 +338,23 @@ def test_api_timeout_becomes_external_api_error(
     isolated_etl_tools,
     monkeypatch,
 ):
-    def fake_get(
+    """
+    ETLTools should propagate API ingestion failures
+    from APIClient.
+    """
+
+    def fake_extract_records(
         *args,
         **kwargs,
     ):
-        raise requests.Timeout()
+        raise ExternalAPIError(
+            "API request timed out."
+        )
 
     monkeypatch.setattr(
-        "utils.etl_tools.requests.get",
-        fake_get,
+        isolated_etl_tools.api_client,
+        "extract_records",
+        fake_extract_records,
     )
 
     with pytest.raises(
@@ -362,40 +371,52 @@ def test_api_extraction_without_real_network(
     isolated_etl_tools,
     monkeypatch,
 ):
-    class FakeResponse:
+    """
+    ETLTools should convert APIClient records into a dataset
+    and save extraction metadata without performing real HTTP.
+    """
 
-        headers = {
-            "Content-Length": "100"
-        }
+    fake_result = APIExtractionResult(
+        records=[
+            {
+                "name": "bulbasaur",
+                "url": "url1",
+            },
+            {
+                "name": "ivysaur",
+                "url": "url2",
+            },
+        ],
+        metadata={
+            "source_url": (
+                "https://example.com/api"
+            ),
+            "pages_fetched": 1,
+            "records_extracted": 2,
+            "bytes_downloaded": 100,
+            "pagination_enabled": True,
+            "records_path": "results",
+            "next_path": "next",
+            "authenticated": False,
+            "started_at": (
+                "2026-09-13T10:00:00+00:00"
+            ),
+            "completed_at": (
+                "2026-09-13T10:00:01+00:00"
+            ),
+        },
+    )
 
-        content = b"fake-response"
-
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {
-                "results": [
-                    {
-                        "name": "bulbasaur",
-                        "url": "url1",
-                    },
-                    {
-                        "name": "ivysaur",
-                        "url": "url2",
-                    },
-                ]
-            }
-
-    def fake_get(
+    def fake_extract_records(
         *args,
         **kwargs,
     ):
-        return FakeResponse()
+        return fake_result
 
     monkeypatch.setattr(
-        "utils.etl_tools.requests.get",
-        fake_get,
+        isolated_etl_tools.api_client,
+        "extract_records",
+        fake_extract_records,
     )
 
     result = (
@@ -406,16 +427,41 @@ def test_api_extraction_without_real_network(
         )
     )
 
-    output_file = (
-        isolated_etl_tools
-        .data_root
+    dataset_file = (
+        isolated_etl_tools.data_root
         / "extract"
         / "extracted_data.csv"
     )
 
-    assert output_file.exists()
+    metadata_file = (
+        isolated_etl_tools.data_root
+        / "extract"
+        / "extraction_metadata.json"
+    )
+
+    assert dataset_file.exists()
+
+    assert metadata_file.exists()
+
+    dataframe = pd.read_csv(
+        dataset_file
+    )
+
+    assert len(dataframe) == 2
+
+    assert list(
+        dataframe["name"]
+    ) == [
+        "bulbasaur",
+        "ivysaur",
+    ]
 
     assert (
         "Data successfully extracted"
+        in result
+    )
+
+    assert (
+        "Pages fetched: 1"
         in result
     )
