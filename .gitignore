@@ -45,3 +45,6 @@ htmlcov/
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+# Runtime datasets and pipeline state
+data/
