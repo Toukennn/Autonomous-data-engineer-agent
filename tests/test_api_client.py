@@ -1,3 +1,4 @@
+import socket
 import pytest
 import requests
 from pydantic import SecretStr
@@ -289,6 +290,7 @@ def test_invalid_json_is_rejected(
     monkeypatch,
 ):
     class FakeResponse:
+        status_code = 200
         headers = {}
         content = b"not-json"
 
@@ -299,6 +301,12 @@ def test_invalid_json_is_rejected(
             raise ValueError(
                 "Invalid JSON"
             )
+
+    monkeypatch.setattr(
+        api_client,
+        "_validate_public_destination",
+        lambda url: None,
+    )
 
     monkeypatch.setattr(
         api_client.session,
@@ -315,7 +323,6 @@ def test_invalid_json_is_rejected(
             {},
         )
 
-
 def test_large_response_is_rejected(
     api_client,
     monkeypatch,
@@ -323,6 +330,7 @@ def test_large_response_is_rejected(
     api_client.max_response_bytes = 3
 
     class FakeResponse:
+        status_code = 200
         headers = {}
         content = b"1234"
 
@@ -333,6 +341,12 @@ def test_large_response_is_rejected(
             return {
                 "results": []
             }
+
+    monkeypatch.setattr(
+        api_client,
+        "_validate_public_destination",
+        lambda url: None,
+    )
 
     monkeypatch.setattr(
         api_client.session,
@@ -348,7 +362,6 @@ def test_large_response_is_rejected(
             "https://example.com/api",
             {},
         )
-
 
 # ============================================================
 # PAGINATION
