@@ -63,7 +63,7 @@ and delegates the task to the appropriate specialist agent.
 
 ---
 
-## ETL Agent
+## ETL Agent (A ReAct agent)
 
 The ETL agent supports API extraction and deterministic tabular transformations.
 
