@@ -2854,7 +2854,6 @@ class ETLTools:
             f"Metadata: {metadata_file}\n"
             f"Plan summary: {plan.summary}"
             f"\nLineage event: {lineage_event_id}"
-            f"{lineage_event_id}"
         )
 
 
