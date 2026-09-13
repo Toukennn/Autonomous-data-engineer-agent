@@ -34,6 +34,12 @@ from utils.schema_evolution import (
     schema_transition_fingerprint,
 )
 
+from utils.data_layers import (
+    DataLayer,
+    resolve_layer_dataset_directory,
+    validate_dataset_name,
+)
+
 
 class ETLTools:
     """
@@ -933,8 +939,8 @@ class ETLTools:
     def extract_load(
         self,
         url: str,
-        output_folder: str,
-        format: str,
+        dataset_name: str = "extract",
+        format: str = "csv",
         paginate: bool = True,
         records_path: str | None = "results",
         next_path: str | None = "next",
@@ -965,9 +971,19 @@ class ETLTools:
             format
         )
 
+        safe_dataset_name = (
+            validate_dataset_name(
+                dataset_name
+            )
+        )
+
         output_directory = (
-            self._resolve_data_path(
-                output_folder
+            resolve_layer_dataset_directory(
+                data_root=self.data_root,
+                layer=DataLayer.BRONZE,
+                dataset_name=(
+                    safe_dataset_name
+                ),
             )
         )
 
@@ -1005,6 +1021,7 @@ class ETLTools:
         )
 
         state_store = None
+        state = None
         previous_watermark = None
 
         if incremental_enabled:
@@ -1096,6 +1113,15 @@ class ETLTools:
                     "watermark_field": (
                         watermark_field
                     ),
+                    "dataset_name": (
+                        safe_dataset_name
+                    ),
+                    "data_layer": (
+                        DataLayer.BRONZE.value
+                    ),
+                    "output_file": str(
+                        output_file
+                    ),
                 }
 
                 if isinstance(
@@ -1123,6 +1149,23 @@ class ETLTools:
                                 "associated with a different "
                                 f"{key}."
                             )
+
+
+        # ===========================================================
+        # Prevent historical data loss
+        # ===========================================================
+         
+        if (
+            state is not None
+            and not output_file.exists()
+        ):
+            raise DatasetError(
+                "Incremental checkpoint exists but "
+                "the associated Bronze dataset is missing. "
+                "Refusing to continue because using the "
+                "stored checkpoint could skip historical data."
+            )
+
 
         # ============================================================
         # API EXTRACTION
@@ -1271,6 +1314,17 @@ class ETLTools:
                 "schema_evolution_policy": (
                     self.SCHEMA_EVOLUTION_POLICY
                 ),
+                "dataset_name": (
+                    safe_dataset_name
+                ),
+                "data_layer": (
+                    DataLayer.BRONZE.value
+                ),
+                "ingestion_mode": (
+                    "incremental"
+                    if incremental_enabled
+                    else "full"
+                ),
             }
         )
 
@@ -1283,7 +1337,8 @@ class ETLTools:
         # CHECKPOINT COMMIT
         # ============================================================
         #
-        # This MUST remain after both durable writes above.
+        # This MUST remain after all durable writes above: 
+        # dataset, schema history, and extraction metadata
         # ============================================================
 
         checkpoint_file = None
@@ -1315,6 +1370,21 @@ class ETLTools:
                             "output_file": str(
                                 output_file
                             ),
+                            "dataset_name": (
+                                safe_dataset_name
+                            ),
+                            "data_layer": (
+                                DataLayer.BRONZE.value
+                            ),
+                            "schema_version": (
+                                current_schema_version
+                            ),
+                            "schema_fingerprint": (
+                                current_schema_fingerprint
+                            ),
+                            "schema_evolution_policy": (
+                                self.SCHEMA_EVOLUTION_POLICY
+                            ),
                         },
                     )
                 )
@@ -1341,6 +1411,10 @@ class ETLTools:
             f"{current_schema_fingerprint}\n"
             f"Schema history: "
             f"{schema_history_file}"
+            f"\nDataset name: "
+            f"{safe_dataset_name}"
+            f"\nData layer: "
+            f"{DataLayer.BRONZE.value}"
         )
 
         if incremental_enabled:

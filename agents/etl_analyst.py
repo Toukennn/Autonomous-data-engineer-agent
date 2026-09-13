@@ -14,7 +14,7 @@ from utils.llm_pick import pick_llm
 @tool
 def extract_load_tool(
     url: str,
-    output_folder: str = "data/extract",
+    dataset_name: str = "extract",
     format: str = "csv",
     paginate: bool = True,
     records_path: str | None = "results",
@@ -78,8 +78,15 @@ def extract_load_tool(
         url:
             API endpoint.
 
-        output_folder:
-            Folder inside the project's data directory.
+        dataset_name: 
+            Logical name of the Bronze dataset.
+
+            This is not a filesystem path. 
+
+            Example: 
+                orders
+                customers 
+                pokemon
 
         format:
             csv, json, or parquet.
@@ -104,13 +111,22 @@ def extract_load_tool(
 
         watermark_field:
             Record field used to calculate the next watermark.
-
+    
+    Breaking schema-evolution rules:
 
         - Breaking API schema changes are rejected by deterministic code.
+
         - Do not attempt to bypass a rejected schema change by changing the
-        state_key, watermark, or output path.
-        - If a schema rejection report is returned by the tool, explain the
-        detected change to the user and report its location.
+        state_key, watermark configuration, or output path.
+
+        - If a schema rejection report is returned by the extraction tool,
+        explain the detected schema change to the user and report the
+        rejection-report location.
+
+        - Never claim that a rejected schema change was successfully applied.
+
+        - The schema-evolution policy is application-controlled.
+        Do not attempt to override it.
 
     Returns:
         Description of the extraction and saved files.
@@ -119,7 +135,7 @@ def extract_load_tool(
 
     return etl_tools.extract_load(
         url=url,
-        output_folder=output_folder,
+        dataset_name=dataset_name,
         format=format,
         paginate=paginate,
         records_path=records_path,
@@ -289,8 +305,13 @@ Rules:
 
 - Use the appropriate tool whenever the task requires an ETL operation.
 - Do not claim an operation succeeded unless a tool actually executed it.
-- If the user does not specify an extraction folder, use:
-  data/extract
+- API extractions always land in the Bronze data layer. 
+- If the user does not specify a dataset name, use: 
+    extract 
+- A datsaset name is a logical identifier, not a filesystem path. 
+- never choose or invent a Bronze output path. 
+  Deterministic code controls the physical Bronze location. 
+- Do not include "data/", "bronze/", or path separators in a dataset name.
 - If the user does not specify a transformation folder, use:
   data/transform
 - If the user does not specify an output format, use:

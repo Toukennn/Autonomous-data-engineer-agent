@@ -1,9 +1,7 @@
-import pandas as pd
-import pytest
 import json
 
-from utils.api_client import APIExtractionResult
-from utils.exceptions import ExternalAPIError
+import pandas as pd
+import pytest
 
 from models.schema import (
     DropDuplicatesOperation,
@@ -14,14 +12,47 @@ from models.schema import (
     StringTransformOperation,
     TransformPlan,
 )
+from utils.api_client import APIExtractionResult
 from utils.exceptions import (
     DatasetError,
+    ExternalAPIError,
     UnsupportedFormatError,
 )
 
 from utils.incremental_state import (
     IncrementalStateStore
 )
+
+
+def _bronze_dataset_file(
+    isolated_etl_tools,
+    dataset_name: str = "orders",
+):
+    return (
+        isolated_etl_tools.data_root
+        / "bronze"
+        / dataset_name
+        / "extracted_data.csv"
+    )
+
+
+def _save_bronze_dataset(
+    isolated_etl_tools,
+    dataframe: pd.DataFrame,
+    dataset_name: str = "orders",
+):
+    output_file = _bronze_dataset_file(
+        isolated_etl_tools,
+        dataset_name,
+    )
+
+    isolated_etl_tools._save_dataframe(
+        dataframe=dataframe,
+        file_path=output_file,
+        file_format="csv",
+    )
+
+    return output_file
 
 
 def test_filter_and_select_columns(
@@ -367,7 +398,7 @@ def test_api_timeout_becomes_external_api_error(
     ):
         isolated_etl_tools.extract_load(
             url="https://example.com/api",
-            output_folder="data/extract",
+            dataset_name="orders",
             format="csv",
         )
 
@@ -427,20 +458,22 @@ def test_api_extraction_without_real_network(
     result = (
         isolated_etl_tools.extract_load(
             url="https://example.com/api",
-            output_folder="data/extract",
+            dataset_name="orders",
             format="csv",
         )
     )
 
     dataset_file = (
         isolated_etl_tools.data_root
-        / "extract"
+        / "bronze"
+        / "orders"
         / "extracted_data.csv"
     )
 
     metadata_file = (
         isolated_etl_tools.data_root
-        / "extract"
+        / "bronze"
+        / "orders"
         / "extraction_metadata.json"
     )
 
@@ -504,6 +537,18 @@ def test_incremental_checkpoint_advances_after_save(
         },
     )
 
+    existing = pd.DataFrame(
+        {
+            "id": [100],
+            "name": ["existing"],
+        }
+    )
+
+    _save_bronze_dataset(
+        isolated_etl_tools,
+        existing,
+    )
+
     store = IncrementalStateStore(
         isolated_etl_tools.data_root
     )
@@ -537,7 +582,7 @@ def test_incremental_checkpoint_advances_after_save(
 
     isolated_etl_tools.extract_load(
         url="https://example.com/orders",
-        output_folder="data/orders",
+        dataset_name="orders",
         format="csv",
         state_key="orders",
         watermark_param="after_id",
@@ -570,6 +615,17 @@ def test_checkpoint_does_not_advance_when_dataset_save_fails(
             "bytes_downloaded": 10,
             "next_watermark": 101,
         },
+    )
+
+    existing = pd.DataFrame(
+        {
+            "id": [100],
+        }
+    )
+
+    _save_bronze_dataset(
+        isolated_etl_tools,
+        existing,
     )
 
     store = IncrementalStateStore(
@@ -607,7 +663,7 @@ def test_checkpoint_does_not_advance_when_dataset_save_fails(
     ):
         isolated_etl_tools.extract_load(
             url="https://example.com/orders",
-            output_folder="data/orders",
+            dataset_name="orders",
             format="csv",
             state_key="orders",
             watermark_param="after_id",
@@ -679,7 +735,7 @@ def test_incomplete_incremental_configuration_is_rejected(
     ):
         isolated_etl_tools.extract_load(
             url="https://example.com/orders",
-            output_folder="data/orders",
+            dataset_name="orders",
             format="csv",
             state_key="orders",
             watermark_param="after_id",
@@ -711,7 +767,7 @@ def test_incremental_state_key_cannot_be_reused_for_another_source(
     ):
         isolated_etl_tools.extract_load(
             url="https://other.example.com/orders",
-            output_folder="data/orders",
+            dataset_name="orders",
             format="csv",
             state_key="orders",
             watermark_param="after_id",
@@ -723,6 +779,17 @@ def test_incremental_checkpoint_is_passed_to_api_client(
     isolated_etl_tools,
     monkeypatch,
 ):
+    existing = pd.DataFrame(
+        {
+            "id": [250],
+        }
+    )
+
+    _save_bronze_dataset(
+        isolated_etl_tools,
+        existing,
+    )
+
     store = IncrementalStateStore(
         isolated_etl_tools.data_root
     )
@@ -767,7 +834,7 @@ def test_incremental_checkpoint_is_passed_to_api_client(
 
     isolated_etl_tools.extract_load(
         url="https://example.com/orders",
-        output_folder="data/orders",
+        dataset_name="orders",
         format="csv",
         state_key="orders",
         watermark_param="after_id",
@@ -1247,6 +1314,18 @@ def test_checkpoint_does_not_advance_when_schema_history_save_fails(
     isolated_etl_tools,
     monkeypatch,
 ):
+    existing = pd.DataFrame(
+        {
+            "id": [100],
+            "name": ["old"],
+        }
+    )
+
+    _save_bronze_dataset(
+        isolated_etl_tools,
+        existing,
+    )
+
     store = IncrementalStateStore(
         isolated_etl_tools.data_root
     )
@@ -1322,7 +1401,7 @@ def test_checkpoint_does_not_advance_when_schema_history_save_fails(
     ):
         isolated_etl_tools.extract_load(
             url="https://example.com/orders",
-            output_folder="data/orders",
+            dataset_name="orders",
             format="csv",
             state_key="orders",
             watermark_param="after_id",
@@ -1337,3 +1416,88 @@ def test_checkpoint_does_not_advance_when_schema_history_save_fails(
         state["cursor_value"]
         == 100
     )
+
+
+def test_api_extraction_is_saved_in_bronze_layer(
+    isolated_etl_tools,
+    monkeypatch,
+):
+    fake_result = APIExtractionResult(
+        records=[
+            {
+                "id": 1,
+                "name": "a",
+            }
+        ],
+        metadata={
+            "pages_fetched": 1,
+            "records_extracted": 1,
+            "bytes_downloaded": 10,
+            "next_watermark": None,
+        },
+    )
+
+    monkeypatch.setattr(
+        isolated_etl_tools.api_client,
+        "extract_records",
+        lambda *args, **kwargs: (
+            fake_result
+        ),
+    )
+
+    isolated_etl_tools.extract_load(
+        url="https://example.com/orders",
+        dataset_name="orders",
+        format="csv",
+    )
+
+    expected_file = _bronze_dataset_file(
+        isolated_etl_tools,
+    )
+
+    assert expected_file.exists()
+
+
+
+def test_checkpoint_with_missing_bronze_dataset_is_rejected(
+    isolated_etl_tools,
+):
+    store = IncrementalStateStore(
+        isolated_etl_tools.data_root
+    )
+
+    expected_file = _bronze_dataset_file(
+        isolated_etl_tools,
+    )
+
+    store.save(
+        "orders",
+        cursor_value=500,
+        metadata={
+            "source_url": (
+                "https://example.com/orders"
+            ),
+            "watermark_param": (
+                "after_id"
+            ),
+            "watermark_field": "id",
+            "dataset_name": "orders",
+            "data_layer": "bronze",
+            "output_file": str(
+                expected_file
+            ),
+        },
+    )
+
+    with pytest.raises(
+        DatasetError,
+        match="Bronze dataset is missing",
+    ):
+        isolated_etl_tools.extract_load(
+            url="https://example.com/orders",
+            dataset_name="orders",
+            format="csv",
+            state_key="orders",
+            watermark_param="after_id",
+            watermark_field="id",
+        )

@@ -282,6 +282,7 @@ def test_breaking_schema_change_is_reported_without_advancing_checkpoint(
 ):
     existing_file = (
         isolated_etl_tools.data_root
+        / "bronze"
         / "orders"
         / "extracted_data.csv"
     )
@@ -344,7 +345,7 @@ def test_breaking_schema_change_is_reported_without_advancing_checkpoint(
     ):
         isolated_etl_tools.extract_load(
             url="https://example.com/orders",
-            output_folder="data/orders",
+            dataset_name="orders",
             format="csv",
             state_key="orders",
             watermark_param="after_id",
@@ -383,6 +384,7 @@ def test_breaking_schema_change_is_reported_without_advancing_checkpoint(
     # Rejection persisted.
     rejection_file = (
         isolated_etl_tools.data_root
+        / "bronze"
         / "orders"
         / "schema_change_rejections.json"
     )
@@ -419,6 +421,7 @@ def test_same_breaking_schema_change_is_not_reported_twice(
 ):
     rejection_file = (
         isolated_etl_tools.data_root
+        / "bronze"
         / "orders"
         / "schema_change_rejections.json"
     )
