@@ -1501,3 +1501,322 @@ def test_checkpoint_with_missing_bronze_dataset_is_rejected(
             watermark_param="after_id",
             watermark_field="id",
         )
+
+
+
+def test_bronze_to_silver_transformation(
+    isolated_etl_tools,
+):
+    bronze_file = (
+        isolated_etl_tools.data_root
+        / "bronze"
+        / "orders"
+        / "extracted_data.csv"
+    )
+
+    bronze = pd.DataFrame(
+        {
+            "id": [
+                1,
+                2,
+            ],
+            "name": [
+                " ALICE ",
+                " BOB ",
+            ],
+            "unused": [
+                "x",
+                "y",
+            ],
+        }
+    )
+
+    isolated_etl_tools._save_dataframe(
+        dataframe=bronze,
+        file_path=bronze_file,
+        file_format="csv",
+    )
+
+    plan = TransformPlan(
+        operations=[
+            StringTransformOperation(
+                type="string_transform",
+                columns=["name"],
+                action="strip",
+            ),
+            SelectColumnsOperation(
+                type="select_columns",
+                columns=[
+                    "id",
+                    "name",
+                ],
+            ),
+        ],
+        summary=(
+            "Clean names and retain "
+            "Silver columns."
+        ),
+    )
+
+    result = (
+        isolated_etl_tools
+        .transform_bronze_to_silver(
+            source_dataset_name=(
+                "orders"
+            ),
+            plan=plan,
+            output_format="csv",
+        )
+    )
+
+    silver_file = (
+        isolated_etl_tools.data_root
+        / "silver"
+        / "orders"
+        / "transformed_data.csv"
+    )
+
+    metadata_file = (
+        isolated_etl_tools.data_root
+        / "silver"
+        / "orders"
+        / "transformation_metadata.json"
+    )
+
+    assert silver_file.exists()
+    assert metadata_file.exists()
+
+    silver = pd.read_csv(
+        silver_file
+    )
+
+    assert list(
+        silver.columns
+    ) == [
+        "id",
+        "name",
+    ]
+
+    assert list(
+        silver["name"]
+    ) == [
+        "ALICE",
+        "BOB",
+    ]
+
+    assert (
+        "Bronze-to-Silver"
+        in result
+    )
+
+
+def test_silver_transformation_does_not_modify_bronze(
+    isolated_etl_tools,
+):
+    bronze_file = (
+        isolated_etl_tools.data_root
+        / "bronze"
+        / "orders"
+        / "extracted_data.csv"
+    )
+
+    original = pd.DataFrame(
+        {
+            "id": [1],
+            "name": [" ORIGINAL "],
+        }
+    )
+
+    isolated_etl_tools._save_dataframe(
+        dataframe=original,
+        file_path=bronze_file,
+        file_format="csv",
+    )
+
+    plan = TransformPlan(
+        operations=[
+            StringTransformOperation(
+                type="string_transform",
+                columns=["name"],
+                action="strip",
+            )
+        ]
+    )
+
+    (
+        isolated_etl_tools
+        .transform_bronze_to_silver(
+            source_dataset_name="orders",
+            plan=plan,
+        )
+    )
+
+    bronze_after = pd.read_csv(
+        bronze_file
+    )
+
+    assert (
+        bronze_after.iloc[0]["name"]
+        == " ORIGINAL "
+    )
+
+
+def test_silver_transformation_requires_bronze_dataset(
+    isolated_etl_tools,
+):
+    plan = TransformPlan(
+        operations=[]
+    )
+
+    with pytest.raises(
+        DatasetError,
+        match="Bronze dataset does not exist",
+    ):
+        (
+            isolated_etl_tools
+            .transform_bronze_to_silver(
+                source_dataset_name="orders",
+                plan=plan,
+            )
+        )
+
+
+
+def test_multiple_bronze_formats_are_rejected(
+    isolated_etl_tools,
+):
+    bronze_directory = (
+        isolated_etl_tools.data_root
+        / "bronze"
+        / "orders"
+    )
+
+    dataframe = pd.DataFrame(
+        {
+            "id": [1]
+        }
+    )
+
+    isolated_etl_tools._save_dataframe(
+        dataframe=dataframe,
+        file_path=(
+            bronze_directory
+            / "extracted_data.csv"
+        ),
+        file_format="csv",
+    )
+
+    isolated_etl_tools._save_dataframe(
+        dataframe=dataframe,
+        file_path=(
+            bronze_directory
+            / "extracted_data.json"
+        ),
+        file_format="json",
+    )
+
+    plan = TransformPlan(
+        operations=[]
+    )
+
+    with pytest.raises(
+        DatasetError,
+        match="Multiple physical files",
+    ):
+        (
+            isolated_etl_tools
+            .transform_bronze_to_silver(
+                source_dataset_name="orders",
+                plan=plan,
+            )
+        )
+
+
+def test_silver_metadata_records_layers_and_plan(
+    isolated_etl_tools,
+):
+    bronze_file = (
+        isolated_etl_tools.data_root
+        / "bronze"
+        / "orders"
+        / "extracted_data.csv"
+    )
+
+    dataframe = pd.DataFrame(
+        {
+            "id": [1],
+            "name": ["Alice"],
+        }
+    )
+
+    isolated_etl_tools._save_dataframe(
+        dataframe=dataframe,
+        file_path=bronze_file,
+        file_format="csv",
+    )
+
+    plan = TransformPlan(
+        operations=[
+            SelectColumnsOperation(
+                type="select_columns",
+                columns=["id"],
+            )
+        ],
+        summary="Keep identifiers only.",
+    )
+
+    (
+        isolated_etl_tools
+        .transform_bronze_to_silver(
+            source_dataset_name="orders",
+            target_dataset_name=(
+                "clean_orders"
+            ),
+            plan=plan,
+        )
+    )
+
+    metadata_file = (
+        isolated_etl_tools.data_root
+        / "silver"
+        / "clean_orders"
+        / "transformation_metadata.json"
+    )
+
+    with metadata_file.open(
+        "r",
+        encoding="utf-8",
+    ) as file:
+        metadata = json.load(
+            file
+        )
+
+    assert (
+        metadata["source_layer"]
+        == "bronze"
+    )
+
+    assert (
+        metadata["target_layer"]
+        == "silver"
+    )
+
+    assert (
+        metadata["source_dataset"]
+        == "orders"
+    )
+
+    assert (
+        metadata["target_dataset"]
+        == "clean_orders"
+    )
+
+    assert (
+        metadata[
+            "transformation_plan"
+        ]["summary"]
+        == "Keep identifiers only."
+    )
+
+
+

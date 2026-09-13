@@ -121,6 +121,69 @@ class ETLTools:
 
         return candidate
 
+
+    def _resolve_layer_dataset_file(
+        self,
+        *,
+        layer: DataLayer,
+        dataset_name: str,
+        file_stem: str,
+    ) -> Path:
+        """
+        Resolve exactly one physical dataset file inside a
+        deterministic medallion layer.
+
+        The dataset name is a logical identifier, not a path.
+        """
+
+        safe_dataset_name = (
+            validate_dataset_name(
+                dataset_name
+            )
+        )
+
+        dataset_directory = (
+            resolve_layer_dataset_directory(
+                data_root=self.data_root,
+                layer=layer,
+                dataset_name=(
+                    safe_dataset_name
+                ),
+            )
+        )
+
+        candidates = [
+            (
+                dataset_directory
+                / f"{file_stem}.{file_format}"
+            )
+            for file_format
+            in sorted(
+                self.SUPPORTED_FORMATS
+            )
+            if (
+                dataset_directory
+                / f"{file_stem}.{file_format}"
+            ).exists()
+        ]
+
+        if not candidates:
+            raise DatasetError(
+                f"{layer.value.title()} dataset "
+                f"does not exist: "
+                f"{safe_dataset_name}"
+            )
+
+        if len(candidates) > 1:
+            raise DatasetError(
+                f"Multiple physical files exist for "
+                f"{layer.value} dataset "
+                f"'{safe_dataset_name}'. "
+                "The dataset format is ambiguous."
+            )
+
+        return candidates[0]
+
     # ============================================================
     # FORMAT VALIDATION
     # ============================================================
@@ -2232,3 +2295,233 @@ class ETLTools:
             f"Output file: {output_file}\n"
             f"Plan summary: {plan.summary}"
         )
+
+
+    def transform_bronze_to_silver(
+        self,
+        source_dataset_name: str,
+        plan: TransformPlan,
+        target_dataset_name: str | None = None,
+        output_format: str = "csv",
+    ) -> str:
+        """
+        Transform a Bronze dataset into a deterministic Silver dataset.
+
+        Bronze is treated as the immutable source.
+
+        The transformation plan may intentionally change the schema,
+        because Silver represents cleaned and standardized data.
+        """
+
+        source_name = (
+            validate_dataset_name(
+                source_dataset_name
+            )
+        )
+
+        target_name = (
+            validate_dataset_name(
+                target_dataset_name
+                if target_dataset_name
+                is not None
+                else source_name
+            )
+        )
+
+        file_format = (
+            self._validate_format(
+                output_format
+            )
+        )
+
+        # ============================================================
+        # RESOLVE BRONZE SOURCE
+        # ============================================================
+
+        source_file = (
+            self._resolve_layer_dataset_file(
+                layer=DataLayer.BRONZE,
+                dataset_name=source_name,
+                file_stem="extracted_data",
+            )
+        )
+
+        source_dataframe = (
+            self._load_dataframe(
+                str(source_file)
+            )
+        )
+
+        original_rows = len(
+            source_dataframe
+        )
+
+        original_columns = list(
+            source_dataframe.columns
+        )
+
+        source_schema = (
+            dataframe_schema(
+                source_dataframe
+            )
+        )
+
+        source_schema_fingerprint = (
+            schema_fingerprint(
+                source_schema
+            )
+        )
+
+        # ============================================================
+        # APPLY DETERMINISTIC TRANSFORMATION
+        # ============================================================
+
+        transformed = (
+            self.apply_transform_plan(
+                source_dataframe,
+                plan,
+            )
+        )
+
+        output_schema = (
+            dataframe_schema(
+                transformed
+            )
+        )
+
+        output_schema_fingerprint = (
+            schema_fingerprint(
+                output_schema
+            )
+        )
+
+        # ============================================================
+        # SILVER DESTINATION
+        # ============================================================
+
+        output_directory = (
+            resolve_layer_dataset_directory(
+                data_root=self.data_root,
+                layer=DataLayer.SILVER,
+                dataset_name=target_name,
+            )
+        )
+
+        output_file = (
+            output_directory
+            / (
+                "transformed_data."
+                f"{file_format}"
+            )
+        )
+
+        metadata_file = (
+            output_directory
+            / "transformation_metadata.json"
+        )
+
+        # ============================================================
+        # DURABLE SILVER SAVE
+        # ============================================================
+
+        self._save_dataframe_atomic(
+            dataframe=transformed,
+            file_path=output_file,
+            file_format=file_format,
+        )
+
+        # ============================================================
+        # TRANSFORMATION METADATA
+        # ============================================================
+
+        metadata = {
+            "metadata_version": 1,
+            "transformed_at": (
+                datetime.now(
+                    timezone.utc
+                ).isoformat()
+            ),
+            "source_dataset": (
+                source_name
+            ),
+            "source_layer": (
+                DataLayer.BRONZE.value
+            ),
+            "source_file": str(
+                source_file
+            ),
+            "source_schema": (
+                source_schema
+            ),
+            "source_schema_fingerprint": (
+                source_schema_fingerprint
+            ),
+            "target_dataset": (
+                target_name
+            ),
+            "target_layer": (
+                DataLayer.SILVER.value
+            ),
+            "output_file": str(
+                output_file
+            ),
+            "output_format": (
+                file_format
+            ),
+            "input_rows": (
+                original_rows
+            ),
+            "output_rows": len(
+                transformed
+            ),
+            "input_columns": (
+                original_columns
+            ),
+            "output_columns": list(
+                transformed.columns
+            ),
+            "output_schema": (
+                output_schema
+            ),
+            "output_schema_fingerprint": (
+                output_schema_fingerprint
+            ),
+            "transformation_plan": (
+                plan.model_dump(
+                    mode="json"
+                )
+            ),
+        }
+
+        self._save_json_atomic(
+            payload=metadata,
+            file_path=metadata_file,
+        )
+
+        # ============================================================
+        # RESULT
+        # ============================================================
+
+        return (
+            "Bronze-to-Silver transformation "
+            "completed successfully.\n"
+            f"Source dataset: {source_name}\n"
+            f"Source layer: "
+            f"{DataLayer.BRONZE.value}\n"
+            f"Target dataset: {target_name}\n"
+            f"Target layer: "
+            f"{DataLayer.SILVER.value}\n"
+            f"Input rows: {original_rows}\n"
+            f"Output rows: "
+            f"{len(transformed)}\n"
+            f"Output columns: "
+            f"{list(transformed.columns)}\n"
+            f"Output schema fingerprint: "
+            f"{output_schema_fingerprint}\n"
+            f"Output file: {output_file}\n"
+            f"Metadata: {metadata_file}\n"
+            f"Plan summary: {plan.summary}"
+        )
+
+
+    
