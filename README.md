@@ -25,15 +25,15 @@ The system currently contains three main agents:
                               │
                               ▼
                      Data Engineer Router
-                     ┌────────┴────────┐
-                     ▼                 ▼
-                ETL Analyst        SQL Analyst
-                     │                 │
-          ┌──────────┴──────────┐      ▼
-          ▼                     ▼   SQLGlot AST
-   API ingestion         TransformPlan   validation
-          │                     │         │
-          ▼                     ▼         ▼
+                     ┌────────┴────────────┐
+                     ▼                     ▼
+                ETL Analyst            SQL Analyst
+                     │                     │
+          ┌──────────┴──────────┐          ▼
+          ▼                     ▼      SQLGlot AST
+   API ingestion         TransformPlan  validation
+          │                     │          │
+          ▼                     ▼          ▼
       APIClient          deterministic  read-only
           │              Pandas tools   PostgreSQL
           ▼
@@ -137,8 +137,6 @@ incremental merge / schema policy
       ▼
 atomic durable persistence
 ```
-
-![ETL Analyst Graph](etl_analyst_graph.png)
 
 ---
 
@@ -916,8 +914,6 @@ Analytics result
 ```
 
 This creates defense in depth instead of relying on an LLM to decide whether SQL is safe.
-
-![SQL Analyst Graph](sql_analyst_graph.png)
 
 ---
 
