@@ -49,7 +49,6 @@ def pick_llm(level: str):
 
         return ChatAnthropic(
             model=settings.anthropic_model,
-            temperature=0,
             api_key=(
                 settings.anthropic_api_key
                 .get_secret_value()

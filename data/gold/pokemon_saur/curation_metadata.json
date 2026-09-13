@@ -1,0 +1,50 @@
+{
+  "metadata_version": 1,
+  "curated_at": "2026-09-13T21:39:51.643707+00:00",
+  "source_dataset": "pokemon_clean",
+  "source_layer": "silver",
+  "source_file": "C:\\Users\\This PC\\Desktop\\Data engineer agent\\Data-enginner-agent\\data\\silver\\pokemon_clean\\transformed_data.csv",
+  "source_schema": {
+    "name": "string",
+    "url": "string"
+  },
+  "source_schema_fingerprint": "91dd89400b20eaee44f3d61224f278966fa3fd02e2517db091c1afe972e84709",
+  "target_dataset": "pokemon_saur",
+  "target_layer": "gold",
+  "output_file": "C:\\Users\\This PC\\Desktop\\Data engineer agent\\Data-enginner-agent\\data\\gold\\pokemon_saur\\curated_data.csv",
+  "output_format": "csv",
+  "input_rows": 20,
+  "output_rows": 3,
+  "input_columns": [
+    "name",
+    "url"
+  ],
+  "output_columns": [
+    "name",
+    "url"
+  ],
+  "output_schema": {
+    "name": "string",
+    "url": "string"
+  },
+  "output_schema_fingerprint": "91dd89400b20eaee44f3d61224f278966fa3fd02e2517db091c1afe972e84709",
+  "curation_plan": {
+    "operations": [
+      {
+        "type": "filter_rows",
+        "column": "name",
+        "operator": "contains",
+        "value": "saur",
+        "case_sensitive": false
+      },
+      {
+        "type": "select_columns",
+        "columns": [
+          "name",
+          "url"
+        ]
+      }
+    ],
+    "summary": "Filtered rows where 'name' contains 'saur' (case-insensitive) and kept only the 'name' and 'url' columns."
+  }
+}
