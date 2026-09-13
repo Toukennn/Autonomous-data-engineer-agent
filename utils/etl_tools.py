@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from datetime import datetime, timezone
 
 import pandas as pd
 from utils.api_client import APIClient
@@ -27,6 +28,8 @@ from utils.incremental_state import IncrementalStateStore
 
 from utils.schema_evolution import (
     compare_schemas,
+    dataframe_schema,
+    schema_fingerprint,
 )
 
 
@@ -351,6 +354,195 @@ class ETLTools:
                 "Failed to atomically save extraction metadata."
             ) from exc
 
+    def _persist_schema_history(
+        self,
+        dataframe: pd.DataFrame,
+        schema_history_file: Path,
+        source_url: str,
+        output_file: Path,
+    ) -> tuple[str, int]:
+        """
+        Persist schema versions for an extracted dataset.
+
+        A new history entry is written only when the logical schema
+        fingerprint changes.
+
+        Returns:
+            (current_fingerprint, current_schema_version)
+        """
+
+        current_schema = dataframe_schema(
+            dataframe
+        )
+
+        current_fingerprint = (
+            schema_fingerprint(
+                current_schema
+            )
+        )
+
+        # ============================================================
+        # LOAD EXISTING HISTORY
+        # ============================================================
+
+        if schema_history_file.exists():
+
+            try:
+                with schema_history_file.open(
+                    "r",
+                    encoding="utf-8",
+                ) as file:
+                    history = json.load(
+                        file
+                    )
+
+            except (
+                OSError,
+                json.JSONDecodeError,
+            ) as exc:
+                raise DatasetError(
+                    "Failed to load schema history."
+                ) from exc
+
+            if not isinstance(
+                history,
+                dict,
+            ):
+                raise DatasetError(
+                    "Schema history must be a JSON object."
+                )
+
+            entries = history.get(
+                "entries"
+            )
+
+            if not isinstance(
+                entries,
+                list,
+            ):
+                raise DatasetError(
+                    "Schema history contains an invalid entries list."
+                )
+
+        else:
+
+            history = {
+                "history_version": 1,
+                "dataset": str(
+                    output_file
+                ),
+                "entries": [],
+            }
+
+            entries = history[
+                "entries"
+            ]
+
+        # ============================================================
+        # DO NOT DUPLICATE UNCHANGED SCHEMAS
+        # ============================================================
+
+        if entries:
+
+            latest_entry = (
+                entries[-1]
+            )
+
+            if not isinstance(
+                latest_entry,
+                dict,
+            ):
+                raise DatasetError(
+                    "Schema history contains an invalid entry."
+                )
+
+            latest_fingerprint = (
+                latest_entry.get(
+                    "fingerprint"
+                )
+            )
+
+            latest_version = (
+                latest_entry.get(
+                    "schema_version"
+                )
+            )
+
+            if not isinstance(
+                latest_version,
+                int,
+            ):
+                raise DatasetError(
+                    "Schema history contains an invalid schema version."
+                )
+
+            if (
+                latest_fingerprint
+                == current_fingerprint
+            ):
+                return (
+                    current_fingerprint,
+                    latest_version,
+                )
+
+            schema_version = (
+                latest_version + 1
+            )
+
+        else:
+
+            schema_version = 1
+
+        # ============================================================
+        # CREATE NEW SCHEMA VERSION
+        # ============================================================
+
+        entry = {
+            "schema_version": (
+                schema_version
+            ),
+            "fingerprint": (
+                current_fingerprint
+            ),
+            "schema": (
+                current_schema
+            ),
+            "recorded_at": (
+                datetime.now(
+                    timezone.utc
+                ).isoformat()
+            ),
+            "source_url": (
+                source_url
+            ),
+        }
+
+        entries.append(
+            entry
+        )
+
+        history[
+            "latest_fingerprint"
+        ] = current_fingerprint
+
+        history[
+            "entries"
+        ] = entries
+
+        # ============================================================
+        # ATOMIC SAVE
+        # ============================================================
+
+        self._save_json_atomic(
+            payload=history,
+            file_path=schema_history_file,
+        )
+
+        return (
+            current_fingerprint,
+            schema_version,
+        )
+    
 
     def _merge_incremental_dataframe(
         self,
@@ -537,6 +729,11 @@ class ETLTools:
         metadata_file = (
             output_directory
             / "extraction_metadata.json"
+        )
+
+        schema_history_file = (
+            output_directory
+            / "schema_history.json"
         )
 
         # ============================================================
@@ -741,6 +938,22 @@ class ETLTools:
         )
 
         # ============================================================
+        # SCHEMA HISTORY
+        # ============================================================
+
+        (
+            current_schema_fingerprint,
+            current_schema_version,
+        ) = self._persist_schema_history(
+            dataframe=dataframe,
+            schema_history_file=(
+                schema_history_file
+            ),
+            source_url=url,
+            output_file=output_file,
+        )
+
+        # ============================================================
         # EXTRACTION METADATA
         # ============================================================
 
@@ -760,6 +973,15 @@ class ETLTools:
                 ),
                 "rows_in_dataset": len(
                     dataframe
+                ),
+                "schema_version": (
+                    current_schema_version
+                ),
+                "schema_fingerprint": (
+                    current_schema_fingerprint
+                ),
+                "schema_history_file": str(
+                    schema_history_file
                 ),
             }
         )
@@ -824,7 +1046,13 @@ class ETLTools:
             f"Bytes downloaded: "
             f"{result.metadata['bytes_downloaded']}\n"
             f"Dataset: {output_file}\n"
-            f"Metadata: {metadata_file}"
+            f"Metadata: {metadata_file}\n"
+            f"Schema version: "
+            f"{current_schema_version}\n"
+            f"Schema fingerprint: "
+            f"{current_schema_fingerprint}\n"
+            f"Schema history: "
+            f"{schema_history_file}"
         )
 
         if incremental_enabled:

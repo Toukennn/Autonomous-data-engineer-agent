@@ -3,6 +3,8 @@ import pandas as pd
 from utils.schema_evolution import (
     compare_schemas,
     dataframe_schema,
+    dataframe_schema_fingerprint,
+    schema_fingerprint,
 )
 
 
@@ -180,3 +182,67 @@ def test_dataframe_schema_uses_logical_types():
         "active": "boolean",
         "name": "string",
     }
+
+
+def test_schema_fingerprint_is_stable():
+    first = {
+        "id": "number",
+        "name": "string",
+    }
+
+    second = {
+        "id": "number",
+        "name": "string",
+    }
+
+    assert (
+        schema_fingerprint(first)
+        == schema_fingerprint(second)
+    )
+
+
+def test_schema_fingerprint_changes_when_schema_changes():
+    old_schema = {
+        "id": "number",
+        "name": "string",
+    }
+
+    new_schema = {
+        "id": "number",
+        "name": "string",
+        "category": "string",
+    }
+
+    assert (
+        schema_fingerprint(
+            old_schema
+        )
+        != schema_fingerprint(
+            new_schema
+        )
+    )
+
+
+def test_dataframe_values_do_not_change_schema_fingerprint():
+    first = pd.DataFrame(
+        {
+            "id": [1, 2],
+            "name": ["a", "b"],
+        }
+    )
+
+    second = pd.DataFrame(
+        {
+            "id": [100, 200],
+            "name": ["x", "y"],
+        }
+    )
+
+    assert (
+        dataframe_schema_fingerprint(
+            first
+        )
+        == dataframe_schema_fingerprint(
+            second
+        )
+    )

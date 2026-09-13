@@ -2,6 +2,8 @@ from dataclasses import dataclass
 
 import pandas as pd
 
+import hashlib
+import json
 
 @dataclass(frozen=True)
 class SchemaDiff:
@@ -123,6 +125,57 @@ def dataframe_schema(
         )
         for column in dataframe.columns
     }
+
+
+def schema_fingerprint(
+    schema: dict[str, str],
+) -> str:
+    """
+    Produce a stable SHA-256 fingerprint for a logical schema.
+
+    Column order is intentionally included because it is part of the
+    durable tabular representation, especially for CSV datasets.
+    """
+
+    canonical_schema = [
+        {
+            "name": column,
+            "type": logical_type,
+        }
+        for (
+            column,
+            logical_type,
+        ) in schema.items()
+    ]
+
+    canonical_json = json.dumps(
+        canonical_schema,
+        ensure_ascii=False,
+        separators=(
+            ",",
+            ":",
+        ),
+    )
+
+    return hashlib.sha256(
+        canonical_json.encode(
+            "utf-8"
+        )
+    ).hexdigest()
+
+
+def dataframe_schema_fingerprint(
+    dataframe: pd.DataFrame,
+) -> str:
+    """
+    Return the fingerprint of a DataFrame's logical schema.
+    """
+
+    return schema_fingerprint(
+        dataframe_schema(
+            dataframe
+        )
+    )
 
 
 def compare_schemas(

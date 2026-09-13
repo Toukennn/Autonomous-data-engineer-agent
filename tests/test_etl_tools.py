@@ -1,5 +1,6 @@
 import pandas as pd
 import pytest
+import json
 
 from utils.api_client import APIExtractionResult
 from utils.exceptions import ExternalAPIError
@@ -1032,4 +1033,307 @@ def test_additive_schema_retry_remains_idempotent(
             2,
             3,
         ]
+    )
+
+
+def test_schema_history_creates_initial_version(
+    isolated_etl_tools,
+):
+    dataframe = pd.DataFrame(
+        {
+            "id": [1],
+            "name": ["a"],
+        }
+    )
+
+    history_file = (
+        isolated_etl_tools.data_root
+        / "orders"
+        / "schema_history.json"
+    )
+
+    output_file = (
+        isolated_etl_tools.data_root
+        / "orders"
+        / "extracted_data.csv"
+    )
+
+    fingerprint, version = (
+        isolated_etl_tools
+        ._persist_schema_history(
+            dataframe=dataframe,
+            schema_history_file=(
+                history_file
+            ),
+            source_url=(
+                "https://example.com/orders"
+            ),
+            output_file=output_file,
+        )
+    )
+
+    assert version == 1
+
+    with history_file.open(
+        "r",
+        encoding="utf-8",
+    ) as file:
+        history = json.load(
+            file
+        )
+
+    assert len(
+        history["entries"]
+    ) == 1
+
+    assert (
+        history["latest_fingerprint"]
+        == fingerprint
+    )
+
+    assert (
+        history["entries"][0][
+            "schema"
+        ]
+        == {
+            "id": "number",
+            "name": "string",
+        }
+    )
+
+
+
+def test_same_schema_does_not_create_new_version(
+    isolated_etl_tools,
+):
+    dataframe = pd.DataFrame(
+        {
+            "id": [1],
+            "name": ["a"],
+        }
+    )
+
+    history_file = (
+        isolated_etl_tools.data_root
+        / "orders"
+        / "schema_history.json"
+    )
+
+    output_file = (
+        isolated_etl_tools.data_root
+        / "orders"
+        / "extracted_data.csv"
+    )
+
+    first = (
+        isolated_etl_tools
+        ._persist_schema_history(
+            dataframe=dataframe,
+            schema_history_file=history_file,
+            source_url=(
+                "https://example.com/orders"
+            ),
+            output_file=output_file,
+        )
+    )
+
+    second = (
+        isolated_etl_tools
+        ._persist_schema_history(
+            dataframe=dataframe,
+            schema_history_file=history_file,
+            source_url=(
+                "https://example.com/orders"
+            ),
+            output_file=output_file,
+        )
+    )
+
+    assert first == second
+
+    with history_file.open(
+        "r",
+        encoding="utf-8",
+    ) as file:
+        history = json.load(
+            file
+        )
+
+    assert len(
+        history["entries"]
+    ) == 1
+
+
+
+def test_additive_schema_creates_new_history_version(
+    isolated_etl_tools,
+):
+    history_file = (
+        isolated_etl_tools.data_root
+        / "orders"
+        / "schema_history.json"
+    )
+
+    output_file = (
+        isolated_etl_tools.data_root
+        / "orders"
+        / "extracted_data.csv"
+    )
+
+    first_dataframe = pd.DataFrame(
+        {
+            "id": [1],
+            "name": ["a"],
+        }
+    )
+
+    second_dataframe = pd.DataFrame(
+        {
+            "id": [1],
+            "name": ["a"],
+            "category": ["x"],
+        }
+    )
+
+    isolated_etl_tools._persist_schema_history(
+        dataframe=first_dataframe,
+        schema_history_file=history_file,
+        source_url=(
+            "https://example.com/orders"
+        ),
+        output_file=output_file,
+    )
+
+    _, version = (
+        isolated_etl_tools
+        ._persist_schema_history(
+            dataframe=second_dataframe,
+            schema_history_file=history_file,
+            source_url=(
+                "https://example.com/orders"
+            ),
+            output_file=output_file,
+        )
+    )
+
+    assert version == 2
+
+    with history_file.open(
+        "r",
+        encoding="utf-8",
+    ) as file:
+        history = json.load(
+            file
+        )
+
+    assert len(
+        history["entries"]
+    ) == 2
+
+    assert (
+        history["entries"][1][
+            "schema"
+        ]
+        == {
+            "id": "number",
+            "name": "string",
+            "category": "string",
+        }
+    )
+
+
+
+def test_checkpoint_does_not_advance_when_schema_history_save_fails(
+    isolated_etl_tools,
+    monkeypatch,
+):
+    store = IncrementalStateStore(
+        isolated_etl_tools.data_root
+    )
+
+    store.save(
+        "orders",
+        cursor_value=100,
+        metadata={
+            "source_url": (
+                "https://example.com/orders"
+            ),
+            "watermark_param": (
+                "after_id"
+            ),
+            "watermark_field": "id",
+        },
+    )
+
+    fake_result = APIExtractionResult(
+        records=[
+            {
+                "id": 101,
+                "name": "new",
+            }
+        ],
+        metadata={
+            "pages_fetched": 1,
+            "records_extracted": 1,
+            "bytes_downloaded": 10,
+            "next_watermark": 101,
+        },
+    )
+
+    monkeypatch.setattr(
+        isolated_etl_tools.api_client,
+        "extract_records",
+        lambda *args, **kwargs: (
+            fake_result
+        ),
+    )
+
+    original_save_json = (
+        isolated_etl_tools
+        ._save_json_atomic
+    )
+
+    def fail_schema_history(
+        payload,
+        file_path,
+    ):
+        if (
+            file_path.name
+            == "schema_history.json"
+        ):
+            raise DatasetError(
+                "simulated schema history failure"
+            )
+
+        return original_save_json(
+            payload,
+            file_path,
+        )
+
+    monkeypatch.setattr(
+        isolated_etl_tools,
+        "_save_json_atomic",
+        fail_schema_history,
+    )
+
+    with pytest.raises(
+        DatasetError,
+        match="schema history failure",
+    ):
+        isolated_etl_tools.extract_load(
+            url="https://example.com/orders",
+            output_folder="data/orders",
+            format="csv",
+            state_key="orders",
+            watermark_param="after_id",
+            watermark_field="id",
+        )
+
+    state = store.load(
+        "orders"
+    )
+
+    assert (
+        state["cursor_value"]
+        == 100
     )
