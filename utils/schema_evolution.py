@@ -154,9 +154,10 @@ def compare_schemas(
         if column not in incoming_schema
     )
 
-    shared_columns = (
-        existing_schema.keys()
-        & incoming_schema.keys()
+    shared_columns = tuple(
+        column
+        for column in existing_schema
+        if column in incoming_schema
     )
 
     type_changes = {

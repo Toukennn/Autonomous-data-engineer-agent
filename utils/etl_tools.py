@@ -360,11 +360,18 @@ class ETLTools:
         """
         Merge newly extracted records with an existing dataset.
 
-        Exact duplicate rows are removed so retrying an extraction
-        after a checkpoint-write failure does not duplicate records.
+        Safe additive schema evolution is supported:
 
-        Schema changes are rejected for now. Schema evolution will be
-        handled explicitly in a later phase.
+        - newly added columns are accepted
+        - historical rows receive null values for new columns
+
+        Breaking changes are rejected:
+
+        - removed columns
+        - logical type changes
+
+        Exact duplicate rows are removed so retrying an extraction
+        after a checkpoint-write failure remains idempotent.
         """
 
         if not existing_file.exists():
@@ -376,6 +383,8 @@ class ETLTools:
             )
         )
 
+        # An empty API batch does not provide enough information to
+        # infer a schema change.
         if new_dataframe.empty:
             return existing_dataframe
 
@@ -384,7 +393,11 @@ class ETLTools:
             incoming_dataframe=new_dataframe,
         )
 
-        if schema_diff.has_changes:
+        # ============================================================
+        # BREAKING SCHEMA CHANGES
+        # ============================================================
+
+        if schema_diff.is_breaking:
 
             details = []
 
@@ -407,15 +420,45 @@ class ETLTools:
                 )
 
             raise DatasetError(
-                "Incremental API schema changed. "
+                "Breaking incremental API schema change detected. "
                 + " ".join(details)
-                + " Automatic schema evolution is not yet enabled."
             )
 
-        # Preserve the existing column order.
-        new_dataframe = new_dataframe[
-            existing_dataframe.columns
-        ]
+        # ============================================================
+        # SAFE ADDITIVE EVOLUTION
+        # ============================================================
+
+        if schema_diff.is_additive_only:
+
+            final_columns = [
+                *existing_dataframe.columns,
+                *schema_diff.added_columns,
+            ]
+
+            # reindex automatically fills the newly introduced columns
+            # in historical rows with null values.
+            existing_dataframe = (
+                existing_dataframe.reindex(
+                    columns=final_columns
+                )
+            )
+
+            new_dataframe = (
+                new_dataframe.reindex(
+                    columns=final_columns
+                )
+            )
+
+        else:
+            # No schema change.
+            # Preserve the durable dataset's column ordering.
+            new_dataframe = new_dataframe[
+                existing_dataframe.columns
+            ]
+
+        # ============================================================
+        # MERGE
+        # ============================================================
 
         combined = pd.concat(
             [
@@ -425,11 +468,10 @@ class ETLTools:
             ignore_index=True,
         )
 
-        # Important for idempotent retries:
-        #
-        # data may have been successfully saved before a crash
-        # prevented the checkpoint from advancing. Re-fetching those
-        # same records must not duplicate them.
+        # ============================================================
+        # IDEMPOTENT RETRY PROTECTION
+        # ============================================================
+
         combined = (
             combined
             .drop_duplicates(

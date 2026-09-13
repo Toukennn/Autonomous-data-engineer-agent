@@ -779,7 +779,7 @@ def test_incremental_checkpoint_is_passed_to_api_client(
     )
 
 
-def test_incremental_schema_change_reports_added_columns(
+def test_incremental_additive_schema_change_is_accepted(
     isolated_etl_tools,
 ):
     existing_file = (
@@ -821,9 +821,84 @@ def test_incremental_schema_change_reports_added_columns(
         }
     )
 
+    result = (
+        isolated_etl_tools
+        ._merge_incremental_dataframe(
+            existing_file=existing_file,
+            new_dataframe=incoming,
+        )
+    )
+
+    assert list(
+        result.columns
+    ) == [
+        "id",
+        "name",
+        "category",
+    ]
+
+    assert len(
+        result
+    ) == 3
+
+    assert pd.isna(
+        result.loc[
+            0,
+            "category",
+        ]
+    )
+
+    assert pd.isna(
+        result.loc[
+            1,
+            "category",
+        ]
+    )
+
+    assert (
+        result.loc[
+            2,
+            "category",
+        ]
+        == "new"
+    )
+
+
+def test_removed_column_is_still_rejected(
+    isolated_etl_tools,
+):
+    existing_file = (
+        isolated_etl_tools.data_root
+        / "orders"
+        / "extracted_data.csv"
+    )
+
+    existing = pd.DataFrame(
+        {
+            "id": [1],
+            "name": ["a"],
+            "email": [
+                "a@example.com"
+            ],
+        }
+    )
+
+    isolated_etl_tools._save_dataframe(
+        existing,
+        existing_file,
+        "csv",
+    )
+
+    incoming = pd.DataFrame(
+        {
+            "id": [2],
+            "name": ["b"],
+        }
+    )
+
     with pytest.raises(
         DatasetError,
-        match="Added columns",
+        match="Removed columns",
     ):
         (
             isolated_etl_tools
@@ -832,3 +907,129 @@ def test_incremental_schema_change_reports_added_columns(
                 new_dataframe=incoming,
             )
         )
+
+
+def test_type_change_is_still_rejected(
+    isolated_etl_tools,
+):
+    existing_file = (
+        isolated_etl_tools.data_root
+        / "orders"
+        / "extracted_data.csv"
+    )
+
+    existing = pd.DataFrame(
+        {
+            "id": [
+                1,
+                2,
+            ]
+        }
+    )
+
+    isolated_etl_tools._save_dataframe(
+        existing,
+        existing_file,
+        "csv",
+    )
+
+    incoming = pd.DataFrame(
+        {
+            "id": [
+                "three",
+                "four",
+            ]
+        }
+    )
+
+    with pytest.raises(
+        DatasetError,
+        match="Type changes",
+    ):
+        (
+            isolated_etl_tools
+            ._merge_incremental_dataframe(
+                existing_file=existing_file,
+                new_dataframe=incoming,
+            )
+        )
+
+
+def test_additive_schema_retry_remains_idempotent(
+    isolated_etl_tools,
+):
+    existing_file = (
+        isolated_etl_tools.data_root
+        / "orders"
+        / "extracted_data.csv"
+    )
+
+    existing = pd.DataFrame(
+        {
+            "id": [
+                1,
+                2,
+            ],
+            "name": [
+                "a",
+                "b",
+            ],
+        }
+    )
+
+    isolated_etl_tools._save_dataframe(
+        existing,
+        existing_file,
+        "csv",
+    )
+
+    incoming = pd.DataFrame(
+        {
+            "id": [
+                3
+            ],
+            "name": [
+                "c"
+            ],
+            "category": [
+                "new"
+            ],
+        }
+    )
+
+    first_merge = (
+        isolated_etl_tools
+        ._merge_incremental_dataframe(
+            existing_file=existing_file,
+            new_dataframe=incoming,
+        )
+    )
+
+    isolated_etl_tools._save_dataframe(
+        first_merge,
+        existing_file,
+        "csv",
+    )
+
+    second_merge = (
+        isolated_etl_tools
+        ._merge_incremental_dataframe(
+            existing_file=existing_file,
+            new_dataframe=incoming,
+        )
+    )
+
+    assert len(
+        second_merge
+    ) == 3
+
+    assert (
+        list(
+            second_merge["id"]
+        )
+        == [
+            1,
+            2,
+            3,
+        ]
+    )
