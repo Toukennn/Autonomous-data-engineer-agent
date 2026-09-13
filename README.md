@@ -21,9 +21,9 @@ The system currently contains three main agents:
 - **SQL Analyst Agent** — converts natural-language questions into PostgreSQL queries and safely executes read-only analytics.
 
 ```text
-User Request
-      │
-      ▼
+      User Request
+           │
+           ▼
 Data Engineer Router
    ┌───────┴────────┐
    ▼                ▼
