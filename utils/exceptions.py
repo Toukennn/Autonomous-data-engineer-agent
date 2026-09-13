@@ -40,6 +40,28 @@ class DatasetError(ETLError):
     """
 
 
+class SchemaEvolutionError(DatasetError):
+    """
+    A dataset was rejected because its schema transition
+    violates the configured schema-evolution policy.
+
+    details contains the deterministic schema comparison that
+    caused the rejection.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        details: dict[str, object],
+    ):
+        super().__init__(
+            message
+        )
+
+        self.details = details
+
+
 class ExternalAPIError(ETLError):
     """
     External API extraction failed.

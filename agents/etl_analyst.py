@@ -105,6 +105,13 @@ def extract_load_tool(
         watermark_field:
             Record field used to calculate the next watermark.
 
+
+        - Breaking API schema changes are rejected by deterministic code.
+        - Do not attempt to bypass a rejected schema change by changing the
+        state_key, watermark, or output path.
+        - If a schema rejection report is returned by the tool, explain the
+        detected change to the user and report its location.
+
     Returns:
         Description of the extraction and saved files.
     """

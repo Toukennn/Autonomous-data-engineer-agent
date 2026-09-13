@@ -5,6 +5,7 @@ import pandas as pd
 import hashlib
 import json
 
+
 @dataclass(frozen=True)
 class SchemaDiff:
     """
@@ -232,3 +233,38 @@ def compare_schemas(
         removed_columns=removed_columns,
         type_changes=type_changes,
     )
+
+
+def schema_transition_fingerprint(
+    existing_schema: dict[str, str],
+    incoming_schema: dict[str, str],
+) -> str:
+    """
+    Produce a stable identifier for one schema transition.
+
+    The same old-schema -> new-schema transition always produces
+    the same fingerprint.
+    """
+
+    existing_fingerprint = (
+        schema_fingerprint(
+            existing_schema
+        )
+    )
+
+    incoming_fingerprint = (
+        schema_fingerprint(
+            incoming_schema
+        )
+    )
+
+    transition = (
+        f"{existing_fingerprint}"
+        f"->{incoming_fingerprint}"
+    )
+
+    return hashlib.sha256(
+        transition.encode(
+            "utf-8"
+        )
+    ).hexdigest()

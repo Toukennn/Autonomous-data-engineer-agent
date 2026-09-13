@@ -21,6 +21,7 @@ from models.schema import (
 )
 from utils.exceptions import (
     DatasetError,
+    SchemaEvolutionError,
     UnsupportedFormatError,
 )
 
@@ -30,6 +31,7 @@ from utils.schema_evolution import (
     compare_schemas,
     dataframe_schema,
     schema_fingerprint,
+    schema_transition_fingerprint,
 )
 
 
@@ -45,6 +47,10 @@ class ETLTools:
 
     Arbitrary Python execution is intentionally not supported.
     """
+
+    SCHEMA_EVOLUTION_POLICY = (
+        "additive_only"
+    )
 
     SUPPORTED_FORMATS = {
         "csv",
@@ -542,7 +548,213 @@ class ETLTools:
             current_fingerprint,
             schema_version,
         )
-    
+
+
+    def _persist_schema_rejection(
+        self,
+        *,
+        details: dict[str, object],
+        rejection_file: Path,
+        source_url: str,
+        output_file: Path,
+        previous_watermark: (
+            str
+            | int
+            | float
+            | None
+        ),
+    ) -> str:
+        """
+        Persist a rejected schema transition.
+
+        Identical rejected transitions are not duplicated.
+
+        Returns:
+            Stable rejection identifier.
+        """
+
+        existing_schema = details.get(
+            "existing_schema"
+        )
+
+        incoming_schema = details.get(
+            "incoming_schema"
+        )
+
+        if not isinstance(
+            existing_schema,
+            dict,
+        ):
+            raise DatasetError(
+                "Schema rejection is missing "
+                "the existing schema."
+            )
+
+        if not isinstance(
+            incoming_schema,
+            dict,
+        ):
+            raise DatasetError(
+                "Schema rejection is missing "
+                "the incoming schema."
+            )
+
+        rejection_id = (
+            schema_transition_fingerprint(
+                existing_schema,
+                incoming_schema,
+            )
+        )
+
+        # ============================================================
+        # LOAD EXISTING REJECTIONS
+        # ============================================================
+
+        if rejection_file.exists():
+
+            try:
+                with rejection_file.open(
+                    "r",
+                    encoding="utf-8",
+                ) as file:
+                    report = json.load(
+                        file
+                    )
+
+            except (
+                OSError,
+                json.JSONDecodeError,
+            ) as exc:
+                raise DatasetError(
+                    "Failed to load schema rejection report."
+                ) from exc
+
+            if not isinstance(
+                report,
+                dict,
+            ):
+                raise DatasetError(
+                    "Schema rejection report must "
+                    "be a JSON object."
+                )
+
+            events = report.get(
+                "events"
+            )
+
+            if not isinstance(
+                events,
+                list,
+            ):
+                raise DatasetError(
+                    "Schema rejection report contains "
+                    "an invalid events list."
+                )
+
+        else:
+
+            report = {
+                "report_version": 1,
+                "dataset": str(
+                    output_file
+                ),
+                "schema_evolution_policy": (
+                    self.SCHEMA_EVOLUTION_POLICY
+                ),
+                "events": [],
+            }
+
+            events = report[
+                "events"
+            ]
+
+        # ============================================================
+        # IDEMPOTENT REJECTION REPORTING
+        # ============================================================
+
+        for event in events:
+
+            if (
+                isinstance(
+                    event,
+                    dict,
+                )
+                and event.get(
+                    "rejection_id"
+                )
+                == rejection_id
+            ):
+                return rejection_id
+
+        # ============================================================
+        # NEW REJECTION EVENT
+        # ============================================================
+
+        event = {
+            "rejection_id": (
+                rejection_id
+            ),
+            "detected_at": (
+                datetime.now(
+                    timezone.utc
+                ).isoformat()
+            ),
+            "decision": "rejected",
+            "reason": (
+                "breaking_schema_change"
+            ),
+            "schema_evolution_policy": (
+                self.SCHEMA_EVOLUTION_POLICY
+            ),
+            "source_url": (
+                source_url
+            ),
+            "previous_watermark": (
+                previous_watermark
+            ),
+            "existing_schema_fingerprint": (
+                schema_fingerprint(
+                    existing_schema
+                )
+            ),
+            "incoming_schema_fingerprint": (
+                schema_fingerprint(
+                    incoming_schema
+                )
+            ),
+            "added_columns": details.get(
+                "added_columns",
+                [],
+            ),
+            "removed_columns": details.get(
+                "removed_columns",
+                [],
+            ),
+            "type_changes": details.get(
+                "type_changes",
+                {},
+            ),
+            "existing_schema": (
+                existing_schema
+            ),
+            "incoming_schema": (
+                incoming_schema
+            ),
+        }
+
+        events.append(
+            event
+        )
+
+        report["events"] = events
+
+        self._save_json_atomic(
+            payload=report,
+            file_path=rejection_file,
+        )
+
+        return rejection_id
+        
 
     def _merge_incremental_dataframe(
         self,
@@ -591,29 +803,66 @@ class ETLTools:
 
         if schema_diff.is_breaking:
 
-            details = []
+            message_details = []
 
             if schema_diff.added_columns:
-                details.append(
+                message_details.append(
                     "Added columns: "
                     f"{list(schema_diff.added_columns)}."
                 )
 
             if schema_diff.removed_columns:
-                details.append(
+                message_details.append(
                     "Removed columns: "
                     f"{list(schema_diff.removed_columns)}."
                 )
 
             if schema_diff.type_changes:
-                details.append(
+                message_details.append(
                     "Type changes: "
                     f"{schema_diff.type_changes}."
                 )
 
-            raise DatasetError(
-                "Breaking incremental API schema change detected. "
-                + " ".join(details)
+            structured_type_changes = {
+                column: {
+                    "from": old_type,
+                    "to": new_type,
+                }
+                for (
+                    column,
+                    (
+                        old_type,
+                        new_type,
+                    ),
+                )
+                in schema_diff.type_changes.items()
+            }
+
+            raise SchemaEvolutionError(
+                (
+                    "Breaking incremental API schema "
+                    "change detected. "
+                    + " ".join(
+                        message_details
+                    )
+                ),
+                details={
+                    "existing_schema": (
+                        schema_diff.existing_schema
+                    ),
+                    "incoming_schema": (
+                        schema_diff.incoming_schema
+                    ),
+                    "added_columns": list(
+                        schema_diff.added_columns
+                    ),
+                    "removed_columns": list(
+                        schema_diff.removed_columns
+                    ),
+                    "type_changes": (
+                        structured_type_changes
+                    ),
+                },
             )
 
         # ============================================================
@@ -703,8 +952,9 @@ class ETLTools:
         The checkpoint is advanced only after:
 
         1. API extraction succeeds.
-        2. Dataset persistence succeeds.
-        3. Extraction metadata persistence succeeds.
+        2. Schema changes are observed and previous versions are historicized
+        3. Dataset persistence succeeds.
+        4. Extraction metadata persistence succeeds.
         """
 
         # ============================================================
@@ -734,6 +984,11 @@ class ETLTools:
         schema_history_file = (
             output_directory
             / "schema_history.json"
+        )
+
+        schema_rejection_file = (
+            output_directory
+            / "schema_change_rejections.json"
         )
 
         # ============================================================
@@ -914,15 +1169,45 @@ class ETLTools:
         # ============================================================
         # INCREMENTAL MERGE
         # ============================================================
-
         if incremental_enabled:
 
-            dataframe = (
-                self._merge_incremental_dataframe(
-                    existing_file=output_file,
-                    new_dataframe=new_dataframe,
+            try:
+                dataframe = (
+                    self._merge_incremental_dataframe(
+                        existing_file=output_file,
+                        new_dataframe=new_dataframe,
+                    )
                 )
-            )
+
+            except SchemaEvolutionError as exc:
+
+                rejection_id = (
+                    self._persist_schema_rejection(
+                        details=exc.details,
+                        rejection_file=(
+                            schema_rejection_file
+                        ),
+                        source_url=url,
+                        output_file=output_file,
+                        previous_watermark=(
+                            previous_watermark
+                        ),
+                    )
+                )
+
+                raise SchemaEvolutionError(
+                    (
+                        f"{exc} "
+                        "The durable dataset and checkpoint "
+                        "were not modified. "
+                        f"Rejection report: "
+                        f"{schema_rejection_file}. "
+                        f"Rejection id: "
+                        f"{rejection_id}."
+                    ),
+                    details=exc.details,
+                ) from exc
+
 
         else:
             dataframe = new_dataframe
@@ -982,6 +1267,9 @@ class ETLTools:
                 ),
                 "schema_history_file": str(
                     schema_history_file
+                ),
+                "schema_evolution_policy": (
+                    self.SCHEMA_EVOLUTION_POLICY
                 ),
             }
         )
