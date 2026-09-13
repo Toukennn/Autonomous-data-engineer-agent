@@ -1,32 +1,62 @@
-from langchain_openai import ChatOpenAI
 from langchain_anthropic import ChatAnthropic
-from dotenv import load_dotenv
-load_dotenv()  # Load environment variables from .env file
+from langchain_openai import ChatOpenAI
 
-def pick_llm(level: str): 
+from config.settings import get_llm_settings
+from utils.exceptions import LLMConfigurationError
+
+
+def pick_llm(level: str):
     """
-    Picks the appropriate LLM based on the level of the question.
-    Args: 
-        level (str): The level of the question, can be "low", "medium", or "high".
-
-    Returns:
-        str: The name of the LLM to be used. 
+    Return the configured LLM for the requested capability level.
     """
 
-    if level.lower() == "low":
-        llm = ChatOpenAI(model_name="gpt-5.6-luna", temperature=0, reasoning_effort="none")
-    elif level.lower() == "medium":
-        llm = ChatOpenAI(model_name="gpt-5.6-terra", temperature=0, reasoning_effort="none")
-    elif level.lower() == "high":
-        llm = ChatOpenAI(model_name="gpt-5.6-sol", temperature=0, reasoning_effort="none")
-    elif level.lower() == "claude": 
-        llm = ChatAnthropic(model_name="claude-sonnet-5")
-    
-    else:
-        raise ValueError("Invalid level. Please choose from 'low', 'medium', or 'high'.")
+    settings = get_llm_settings()
 
-    return llm
+    level = level.lower().strip()
 
-if __name__ == "__main__":
-    llm_obj = pick_llm("low")  # Example usage, you can change the level as needed
-    print(llm_obj.invoke("What is the capital of Switzerland?"))
+    if level in {
+        "low",
+        "medium",
+        "high",
+    }:
+
+        if settings.openai_api_key is None:
+            raise LLMConfigurationError(
+                "OPENAI_API_KEY is not configured."
+            )
+
+        model_by_level = {
+            "low": settings.low_model,
+            "medium": settings.medium_model,
+            "high": settings.high_model,
+        }
+
+        return ChatOpenAI(
+            model=model_by_level[level],
+            temperature=0,
+            api_key=(
+                settings.openai_api_key
+                .get_secret_value()
+            ),
+        )
+
+    if level == "claude":
+
+        if settings.anthropic_api_key is None:
+            raise LLMConfigurationError(
+                "ANTHROPIC_API_KEY is not configured."
+            )
+
+        return ChatAnthropic(
+            model=settings.anthropic_model,
+            temperature=0,
+            api_key=(
+                settings.anthropic_api_key
+                .get_secret_value()
+            ),
+        )
+
+    raise ValueError(
+        "Invalid LLM level. Expected one of: "
+        "low, medium, high, claude."
+    )

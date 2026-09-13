@@ -16,6 +16,7 @@ dependencies = [
     "pandas>=3.0.5",
     "psycopg2-binary>=2.9.12",
     "pydantic>=2.13.5",
+    "pydantic-settings>=2.15.0",
     "python-dotenv>=1.2.3",
     "requests>=2.32.0",
     "sqlglot>=30.18.0",

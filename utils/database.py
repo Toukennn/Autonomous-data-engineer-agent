@@ -4,6 +4,7 @@ from pathlib import Path
 import psycopg2
 from psycopg2 import sql
 from dotenv import load_dotenv
+from config.settings import get_runtime_settings
 
 
 # ============================================================
@@ -201,51 +202,35 @@ class DatabaseUtil:
     def execute_read_only(
         self,
         query: str,
-        statement_timeout_ms: int = 10_000,
-        max_rows: int = 1_000,
+        statement_timeout_ms: int | None = None,
+        max_rows: int | None = None,
     ) -> str:
-        """
-        Execute one query inside a PostgreSQL read-only transaction.
 
-        Protections:
+        from config.settings import get_runtime_settings
 
-        - transaction is READ ONLY
-        - statement timeout
-        - maximum number of returned rows
-        - automatic rollback / cleanup
+        runtime = get_runtime_settings()
 
-        Args:
-            query:
-                Validated SQL query.
+        statement_timeout_ms = (
+            statement_timeout_ms
+            if statement_timeout_ms is not None
+            else runtime.sql_statement_timeout_ms
+        )
 
-            statement_timeout_ms:
-                Maximum database execution time.
-
-            max_rows:
-                Maximum rows returned to the application.
-
-        Returns:
-            String representation of the query result.
-        """
+        max_rows = (
+            max_rows
+            if max_rows is not None
+            else runtime.sql_max_rows
+        )
 
         connection = self._connect()
 
         try:
-
-            # ----------------------------------------------------
-            # Database-level protection
-            # ----------------------------------------------------
-
             connection.set_session(
                 readonly=True,
                 autocommit=False,
             )
 
             with connection.cursor() as cursor:
-
-                # -----------------------------------------------
-                # Statement timeout
-                # -----------------------------------------------
 
                 cursor.execute(
                     """
@@ -260,23 +245,13 @@ class DatabaseUtil:
                     ),
                 )
 
-                # -----------------------------------------------
-                # Execute validated query
-                # -----------------------------------------------
-
-                cursor.execute(
-                    query
-                )
+                cursor.execute(query)
 
                 if cursor.description is None:
-
                     raise RuntimeError(
-                        "Read-only SQL query did not "
-                        "produce a result set."
+                        "Read-only SQL query did not produce a result set."
                     )
 
-                # Fetch one extra row so we can determine
-                # whether truncation happened.
                 rows = cursor.fetchmany(
                     max_rows + 1
                 )
@@ -285,14 +260,11 @@ class DatabaseUtil:
                     len(rows) > max_rows
                 )
 
-                rows = rows[
-                    :max_rows
-                ]
+                rows = rows[:max_rows]
 
                 column_names = [
                     description.name
-                    for description
-                    in cursor.description
+                    for description in cursor.description
                 ]
 
                 result = {
@@ -302,12 +274,9 @@ class DatabaseUtil:
                     "truncated": truncated,
                 }
 
-                # Read-only transaction: rollback deliberately.
                 connection.rollback()
 
-                return str(
-                    result
-                )
+                return str(result)
 
         except psycopg2.Error as exc:
 
@@ -326,53 +295,17 @@ class DatabaseUtil:
 # CONFIG
 # ============================================================
 
+from config.settings import get_database_settings
+
+
 def load_database_config() -> dict:
+    """
+    Load validated PostgreSQL configuration.
+    """
 
-    env_names = {
-        "host": "host",
-        "user": "user",
-        "password": "password",
-        "dbname": "database",
-    }
+    settings = get_database_settings()
 
-    config = {
-        key: os.getenv(env_name)
-        for key, env_name
-        in env_names.items()
-    }
-
-    missing = [
-        env_name
-        for key, env_name
-        in env_names.items()
-        if not config[key]
-    ]
-
-    if missing:
-
-        raise RuntimeError(
-            "Missing required database "
-            "environment variables: "
-            + ", ".join(missing)
-        )
-
-    try:
-
-        config["port"] = int(
-            os.getenv(
-                "port",
-                "5432",
-            )
-        )
-
-    except ValueError as exc:
-
-        raise RuntimeError(
-            "Database port must be "
-            "a valid integer."
-        ) from exc
-
-    return config
+    return settings.psycopg_config()
 
 
 # ============================================================
