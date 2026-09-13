@@ -1,22 +1,13 @@
-import os
-from pathlib import Path
-
 import psycopg2
 from psycopg2 import sql
-from dotenv import load_dotenv
-from config.settings import get_runtime_settings
 
-
-# ============================================================
-# ENVIRONMENT
-# ============================================================
-
-PROJECT_ROOT = (
-    Path(__file__).resolve().parents[1]
+from config.settings import (
+    get_database_settings,
+    get_runtime_settings,
 )
-
-load_dotenv(
-    PROJECT_ROOT / ".env"
+from utils.exceptions import (
+    DatabaseConnectionError,
+    DatabaseQueryError,
 )
 
 
@@ -55,8 +46,7 @@ class DatabaseUtil:
             )
 
         except psycopg2.Error as exc:
-
-            raise ConnectionError(
+            raise DatabaseConnectionError(
                 "Could not connect to PostgreSQL. "
                 "Check the database credentials."
             ) from exc
@@ -181,9 +171,8 @@ class DatabaseUtil:
 
         except psycopg2.Error as exc:
 
-            raise RuntimeError(
-                "Failed to retrieve database "
-                "schema information."
+            raise DatabaseQueryError(
+                "Failed to retrieve database schema information."
             ) from exc
 
         finally:
@@ -205,8 +194,6 @@ class DatabaseUtil:
         statement_timeout_ms: int | None = None,
         max_rows: int | None = None,
     ) -> str:
-
-        from config.settings import get_runtime_settings
 
         runtime = get_runtime_settings()
 
@@ -282,7 +269,7 @@ class DatabaseUtil:
 
             connection.rollback()
 
-            raise RuntimeError(
+            raise DatabaseQueryError(
                 f"SQL execution failed: {exc}"
             ) from exc
 
@@ -294,8 +281,6 @@ class DatabaseUtil:
 # ============================================================
 # CONFIG
 # ============================================================
-
-from config.settings import get_database_settings
 
 
 def load_database_config() -> dict:
