@@ -721,3 +721,122 @@ def test_retry_policy_is_configured(
         retries.respect_retry_after_header
         is True
     )
+
+def test_loopback_ip_is_rejected(
+    api_client,
+):
+    with pytest.raises(
+        ExternalAPIError
+    ):
+        api_client._validate_public_destination(
+            "http://127.0.0.1/api"
+        )
+
+
+def test_private_ip_is_rejected(
+    api_client,
+):
+    with pytest.raises(
+        ExternalAPIError
+    ):
+        api_client._validate_public_destination(
+            "http://192.168.1.10/api"
+        )
+
+
+def test_localhost_is_rejected(
+    api_client,
+):
+    with pytest.raises(
+        ExternalAPIError
+    ):
+        api_client._validate_public_destination(
+            "http://localhost/api"
+        )
+
+
+def test_hostname_resolving_to_private_ip_is_rejected(
+    api_client,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "utils.api_client.socket.getaddrinfo",
+        lambda *args, **kwargs: [
+            (
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                6,
+                "",
+                (
+                    "10.0.0.5",
+                    443,
+                ),
+            )
+        ],
+    )
+
+    with pytest.raises(
+        ExternalAPIError
+    ):
+        api_client._validate_public_destination(
+            "https://example.com/api"
+        )
+
+
+def test_authenticated_http_is_rejected(
+    api_client,
+):
+    api_client.auth_token = SecretStr(
+        "secret"
+    )
+
+    with pytest.raises(
+        ExternalAPIError,
+        match="requires HTTPS",
+    ):
+        api_client.extract_records(
+            "http://example.com/api",
+            use_auth=True,
+        )
+
+
+def test_authenticated_cross_origin_pagination_is_rejected(
+    api_client,
+    monkeypatch,
+):
+    api_client.auth_token = SecretStr(
+        "secret"
+    )
+
+    def fake_request(
+        url,
+        headers,
+    ):
+        return (
+            {
+                "results": [
+                    {
+                        "id": 1
+                    }
+                ],
+                "next": (
+                    "https://evil.example/page2"
+                ),
+            },
+            10,
+        )
+
+    monkeypatch.setattr(
+        api_client,
+        "_request_json",
+        fake_request,
+    )
+
+    with pytest.raises(
+        ExternalAPIError,
+        match="another origin",
+    ):
+        api_client.extract_records(
+            "https://example.com/api",
+            use_auth=True,
+        )

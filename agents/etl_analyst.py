@@ -26,6 +26,14 @@ def extract_load_tool(
 
     Supports resilient paginated API ingestion through APIClient.
 
+    - API extraction supports automatic pagination.
+    - If records are stored somewhere other than "results",
+    provide the correct records_path.
+    - If pagination uses a field other than "next",
+    provide the correct next_path.
+    - Use authenticated extraction only when the API requires it.
+    - Never request, reveal, or include API credentials in tool arguments.
+
     Args:
         url:
             API endpoint from which data should be extracted.

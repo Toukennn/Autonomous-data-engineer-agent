@@ -162,6 +162,12 @@ class RuntimeSettings(_BaseAppSettings):
         validation_alias="API_AUTH_SCHEME",
     )
 
+    api_max_redirects: int = Field(
+        default=5,
+        ge=0,
+        le=20,
+    )
+
 
 class LLMSettings(_BaseAppSettings):
     """

@@ -1,3 +1,5 @@
+import ipaddress
+import socket
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -118,6 +120,10 @@ class APIClient:
             adapter,
         )
 
+        self.max_redirects = (
+            settings.api_max_redirects
+        )
+
     # ============================================================
     # URL VALIDATION
     # ============================================================
@@ -149,6 +155,166 @@ class APIClient:
             raise ExternalAPIError(
                 "API URL must contain a valid hostname."
             )
+
+    @staticmethod
+    def _origin(
+        url: str,
+    ) -> tuple[str, str, int]:
+        """
+        Return a normalized URL origin:
+        scheme, hostname, port.
+        """
+
+        parsed = urlparse(
+            url
+        )
+
+        hostname = (
+            parsed.hostname or ""
+        ).lower()
+
+        if parsed.port is not None:
+            port = parsed.port
+
+        elif parsed.scheme == "https":
+            port = 443
+
+        else:
+            port = 80
+
+        return (
+            parsed.scheme.lower(),
+            hostname,
+            port,
+        )
+
+
+    @staticmethod
+    def _is_unsafe_ip(
+        address: ipaddress.IPv4Address
+        | ipaddress.IPv6Address,
+    ) -> bool:
+        """
+        Reject non-public network destinations.
+        """
+
+        return (
+            not address.is_global
+            or address.is_multicast
+            or address.is_unspecified
+            or address.is_loopback
+            or address.is_link_local
+        )
+
+
+    def _validate_public_destination(
+        self,
+        url: str,
+    ) -> None:
+        """
+        Prevent API ingestion from reaching local/private networks.
+        """
+
+        parsed = urlparse(
+            url
+        )
+
+        hostname = parsed.hostname
+
+        if not hostname:
+            raise ExternalAPIError(
+                "API URL does not contain a valid hostname."
+            )
+
+        normalized_hostname = (
+            hostname.lower()
+        )
+
+        if (
+            normalized_hostname == "localhost"
+            or normalized_hostname.endswith(
+                ".localhost"
+            )
+        ):
+            raise ExternalAPIError(
+                "Localhost API destinations are not allowed."
+            )
+
+        # --------------------------------------------------------
+        # Literal IP address
+        # --------------------------------------------------------
+
+        try:
+            literal_ip = ipaddress.ip_address(
+                normalized_hostname
+            )
+
+        except ValueError:
+            literal_ip = None
+
+        if literal_ip is not None:
+
+            if self._is_unsafe_ip(
+                literal_ip
+            ):
+                raise ExternalAPIError(
+                    "Private or local network API "
+                    "destinations are not allowed."
+                )
+
+            return
+
+        # --------------------------------------------------------
+        # DNS hostname
+        # --------------------------------------------------------
+
+        try:
+            resolved = socket.getaddrinfo(
+                normalized_hostname,
+                parsed.port
+                or (
+                    443
+                    if parsed.scheme == "https"
+                    else 80
+                ),
+                type=socket.SOCK_STREAM,
+            )
+
+        except socket.gaierror as exc:
+            raise ExternalAPIError(
+                "API hostname could not be resolved."
+            ) from exc
+
+        addresses = set()
+
+        for result in resolved:
+
+            raw_address = (
+                result[4][0]
+                .split("%", 1)[0]
+            )
+
+            addresses.add(
+                ipaddress.ip_address(
+                    raw_address
+                )
+            )
+
+        if not addresses:
+            raise ExternalAPIError(
+                "API hostname did not resolve "
+                "to an IP address."
+            )
+
+        for address in addresses:
+
+            if self._is_unsafe_ip(
+                address
+            ):
+                raise ExternalAPIError(
+                    "API hostname resolves to a private "
+                    "or local network destination."
+                )
 
     # ============================================================
     # HEADERS / AUTH
@@ -240,48 +406,157 @@ class APIClient:
         headers: dict[str, str],
     ) -> tuple[Any, int]:
 
-        self._validate_url(
-            url
-        )
+        current_url = url
 
-        try:
-            response = self.session.get(
-                url,
-                headers=headers,
-                timeout=self.timeout,
-            )
-
-            response.raise_for_status()
-
-        except requests.Timeout as exc:
-            raise ExternalAPIError(
-                "API request timed out."
-            ) from exc
-
-        except requests.RequestException as exc:
-            raise ExternalAPIError(
-                f"API request failed: {exc}"
-            ) from exc
-
-        content_length = (
-            response.headers.get(
-                "Content-Length"
+        original_origin = (
+            self._origin(
+                url
             )
         )
 
-        if content_length:
+        authenticated = (
+            self.auth_header
+            in headers
+        )
+
+        for redirect_count in range(
+            self.max_redirects + 1
+        ):
+
+            self._validate_url(
+                current_url
+            )
+
+            self._validate_public_destination(
+                current_url
+            )
 
             try:
-                declared_size = int(
-                    content_length
+                response = self.session.get(
+                    current_url,
+                    headers=headers,
+                    timeout=self.timeout,
+                    allow_redirects=False,
                 )
 
-            except ValueError:
-                declared_size = None
+            except requests.Timeout as exc:
+                raise ExternalAPIError(
+                    "API request timed out."
+                ) from exc
+
+            except requests.RequestException as exc:
+                raise ExternalAPIError(
+                    f"API request failed: {exc}"
+                ) from exc
+
+            # ----------------------------------------------------
+            # SAFE REDIRECT HANDLING
+            # ----------------------------------------------------
+
+            if response.status_code in {
+                301,
+                302,
+                303,
+                307,
+                308,
+            }:
+
+                location = (
+                    response.headers.get(
+                        "Location"
+                    )
+                )
+
+                if not location:
+                    raise ExternalAPIError(
+                        "API returned a redirect "
+                        "without a Location header."
+                    )
+
+                if (
+                    redirect_count
+                    >= self.max_redirects
+                ):
+                    raise ExternalAPIError(
+                        "API exceeded the configured "
+                        "redirect limit."
+                    )
+
+                redirected_url = urljoin(
+                    current_url,
+                    location,
+                )
+
+                self._validate_url(
+                    redirected_url
+                )
+
+                if (
+                    authenticated
+                    and self._origin(
+                        redirected_url
+                    )
+                    != original_origin
+                ):
+                    raise ExternalAPIError(
+                        "Authenticated API requests "
+                        "cannot redirect to another origin."
+                    )
+
+                current_url = (
+                    redirected_url
+                )
+
+                continue
+
+            # ----------------------------------------------------
+            # HTTP STATUS
+            # ----------------------------------------------------
+
+            try:
+                response.raise_for_status()
+
+            except requests.RequestException as exc:
+                raise ExternalAPIError(
+                    f"API request failed: {exc}"
+                ) from exc
+
+            # ----------------------------------------------------
+            # RESPONSE SIZE
+            # ----------------------------------------------------
+
+            content_length = (
+                response.headers.get(
+                    "Content-Length"
+                )
+            )
+
+            if content_length:
+
+                try:
+                    declared_size = int(
+                        content_length
+                    )
+
+                except ValueError:
+                    declared_size = None
+
+                if (
+                    declared_size is not None
+                    and declared_size
+                    > self.max_response_bytes
+                ):
+                    raise ExternalAPIError(
+                        "API response exceeded the configured "
+                        "per-page size limit."
+                    )
+
+            body_size = len(
+                response.content
+            )
 
             if (
-                declared_size is not None
-                and declared_size
+                body_size
                 > self.max_response_bytes
             ):
                 raise ExternalAPIError(
@@ -289,30 +564,27 @@ class APIClient:
                     "per-page size limit."
                 )
 
-        body_size = len(
-            response.content
-        )
+            # ----------------------------------------------------
+            # JSON
+            # ----------------------------------------------------
 
-        if (
-            body_size
-            > self.max_response_bytes
-        ):
-            raise ExternalAPIError(
-                "API response exceeded the configured "
-                "per-page size limit."
+            try:
+                payload = (
+                    response.json()
+                )
+
+            except ValueError as exc:
+                raise ExternalAPIError(
+                    "API response is not valid JSON."
+                ) from exc
+
+            return (
+                payload,
+                body_size,
             )
 
-        try:
-            payload = response.json()
-
-        except ValueError as exc:
-            raise ExternalAPIError(
-                "API response is not valid JSON."
-            ) from exc
-
-        return (
-            payload,
-            body_size,
+        raise ExternalAPIError(
+            "API exceeded the configured redirect limit."
         )
 
     # ============================================================
@@ -407,6 +679,19 @@ class APIClient:
         """
         Extract records from one or more API pages.
 
+        Features:
+        - optional pagination
+        - configurable record path
+        - configurable next-page path
+        - optional authentication
+        - HTTPS enforcement for authenticated requests
+        - same-origin protection for authenticated pagination
+        - pagination-loop detection
+        - page-count limit
+        - record-count limit
+        - total download-size limit
+        - extraction metadata
+
         The default paths support APIs such as PokéAPI:
 
             {
@@ -415,16 +700,40 @@ class APIClient:
             }
         """
 
-        started_at = (
-            datetime.now(
-                timezone.utc
+        # ========================================================
+        # INITIAL URL VALIDATION
+        # ========================================================
+
+        self._validate_url(
+            url
+        )
+
+        # Authenticated API traffic must never use plain HTTP.
+        if (
+            use_auth
+            and urlparse(url).scheme.lower()
+            != "https"
+        ):
+            raise ExternalAPIError(
+                "Authenticated API extraction requires HTTPS."
+            )
+
+        initial_origin = (
+            self._origin(
+                url
             )
         )
 
-        headers = (
-            self._build_headers(
-                use_auth=use_auth
-            )
+        # ========================================================
+        # EXTRACTION START
+        # ========================================================
+
+        started_at = datetime.now(
+            timezone.utc
+        )
+
+        headers = self._build_headers(
+            use_auth=use_auth
         )
 
         current_url = url
@@ -438,12 +747,24 @@ class APIClient:
         pages_fetched = 0
         bytes_downloaded = 0
 
+        # ========================================================
+        # PAGINATION LOOP
+        # ========================================================
+
         while current_url:
+
+            # ----------------------------------------------------
+            # Detect pagination cycles
+            # ----------------------------------------------------
 
             if current_url in visited_urls:
                 raise ExternalAPIError(
                     "Pagination loop detected."
                 )
+
+            # ----------------------------------------------------
+            # Enforce maximum page count
+            # ----------------------------------------------------
 
             if (
                 pages_fetched
@@ -458,6 +779,10 @@ class APIClient:
                 current_url
             )
 
+            # ----------------------------------------------------
+            # Fetch one page
+            # ----------------------------------------------------
+
             payload, page_bytes = (
                 self._request_json(
                     current_url,
@@ -471,6 +796,10 @@ class APIClient:
                 page_bytes
             )
 
+            # ----------------------------------------------------
+            # Total download-size protection
+            # ----------------------------------------------------
+
             if (
                 bytes_downloaded
                 > self.max_total_response_bytes
@@ -480,16 +809,22 @@ class APIClient:
                     "total download-size limit."
                 )
 
-            records = (
-                self._extract_records(
-                    payload,
-                    records_path,
-                )
+            # ----------------------------------------------------
+            # Extract records
+            # ----------------------------------------------------
+
+            records = self._extract_records(
+                payload,
+                records_path,
             )
 
             all_records.extend(
                 records
             )
+
+            # ----------------------------------------------------
+            # Record-count protection
+            # ----------------------------------------------------
 
             if (
                 len(all_records)
@@ -500,8 +835,16 @@ class APIClient:
                     f"maximum of {self.max_records} records."
                 )
 
+            # ----------------------------------------------------
+            # Stop after first page if pagination is disabled
+            # ----------------------------------------------------
+
             if not paginate:
                 break
+
+            # ----------------------------------------------------
+            # Resolve next-page URL
+            # ----------------------------------------------------
 
             next_url = (
                 self._get_nested_value(
@@ -510,6 +853,7 @@ class APIClient:
                 )
             )
 
+            # No next page means extraction is complete.
             if not next_url:
                 break
 
@@ -521,15 +865,49 @@ class APIClient:
                     "Pagination next value must be a URL string."
                 )
 
-            current_url = urljoin(
+            resolved_next_url = urljoin(
                 current_url,
                 next_url,
             )
 
-        completed_at = (
-            datetime.now(
-                timezone.utc
+            self._validate_url(
+                resolved_next_url
             )
+
+            # ----------------------------------------------------
+            # Protect authenticated pagination
+            # ----------------------------------------------------
+            #
+            # Without this check, an API could return:
+            #
+            #     "next": "https://evil.example/page2"
+            #
+            # and our Authorization header could otherwise be sent
+            # to that new host.
+            # ----------------------------------------------------
+
+            if (
+                use_auth
+                and self._origin(
+                    resolved_next_url
+                )
+                != initial_origin
+            ):
+                raise ExternalAPIError(
+                    "Authenticated pagination cannot "
+                    "continue to another origin."
+                )
+
+            current_url = (
+                resolved_next_url
+            )
+
+        # ========================================================
+        # EXTRACTION COMPLETE
+        # ========================================================
+
+        completed_at = datetime.now(
+            timezone.utc
         )
 
         metadata = {
@@ -544,9 +922,15 @@ class APIClient:
             "pagination_enabled": (
                 paginate
             ),
-            "records_path": records_path,
-            "next_path": next_path,
-            "authenticated": use_auth,
+            "records_path": (
+                records_path
+            ),
+            "next_path": (
+                next_path
+            ),
+            "authenticated": (
+                use_auth
+            ),
             "started_at": (
                 started_at.isoformat()
             ),
