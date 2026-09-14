@@ -1,6 +1,6 @@
 # Autonomous Data Engineer Agent
 
-A safety-oriented agentic data engineering system for **API ingestion**, **deterministic ETL workflows**, **Medallion data architecture**, **lineage tracking**, and **natural-language SQL analytics**.
+A safety-oriented agentic data engineering system for **API ingestion**, **deterministic ETL workflows**, **Medallion data architecture**, **lineage**, **runtime observability**, and **natural-language SQL analytics**.
 
 The project uses LangGraph to route user requests to specialized ETL and SQL agents while keeping sensitive operations under deterministic application control.
 
@@ -8,19 +8,17 @@ The core design principle is:
 
 > **LLMs decide what should happen. Deterministic tools decide how it happens.**
 
-The LLM may decide which supported workflow should run and may create a typed transformation plan, but it does not receive arbitrary Python execution, arbitrary filesystem access, direct checkpoint control, schema-policy control, lineage-write control, or unrestricted SQL execution.
+The LLM may select a supported workflow and create a typed transformation plan, but it does not receive arbitrary Python execution, arbitrary filesystem access, direct checkpoint control, schema-policy control, lineage-write control, or unrestricted SQL execution.
 
 ---
 
-## Overview
+# Overview
 
-The system currently contains three main agents:
+The system contains three main agents:
 
-- **Data Engineer Agent** — routes each user request to the ETL or SQL specialist.
-- **ETL Analyst Agent** — orchestrates API → Bronze → Silver → Gold workflows using bounded tools.
+- **Data Engineer Agent** — routes requests to the correct specialist.
+- **ETL Analyst Agent** — orchestrates bounded API → Bronze → Silver → Gold workflows.
 - **SQL Analyst Agent** — converts natural-language questions into PostgreSQL queries and safely executes read-only analytics.
-
-The ETL path now follows a deterministic Medallion architecture:
 
 ```text
                               User Request
@@ -55,8 +53,9 @@ The ETL path now follows a deterministic Medallion architecture:
               └──── deterministic ─┘
                        ETLTools
                          │
-                         ▼
-                     lineage
+              ┌──────────┼──────────┐
+              ▼          ▼          ▼
+          checkpoints  lineage   run records
 ```
 
 ---
@@ -77,11 +76,11 @@ or:
 sql
 ```
 
-and delegates the task to the correct specialist.
+and delegates execution to the corresponding specialist.
 
 ![Data Engineer Graph](data_engineer_graph.png)
 
-The router does not execute ETL or SQL itself. It only delegates the user request.
+The router does not execute ETL or SQL itself.
 
 ---
 
@@ -97,9 +96,7 @@ bronze_to_silver_tool
 silver_to_gold_tool
 ```
 
-The generic agent-facing arbitrary-path transformation tool was removed from the active toolkit.
-
-This means the agent can choose only valid logical transitions:
+The agent can therefore choose only valid logical transitions:
 
 ```text
 External API → Bronze
@@ -107,19 +104,9 @@ Bronze       → Silver
 Silver       → Gold
 ```
 
-It cannot directly choose:
+It cannot directly choose arbitrary input/output paths, arbitrary target layers, direct Bronze → Gold, or unrestricted Python code.
 
-```text
-arbitrary input path
-arbitrary output path
-arbitrary target layer
-Bronze → Gold
-unrestricted Python code
-```
-
-The ETL system prompt also enforces dependency ordering for multi-stage requests.
-
-For example, if the user asks to extract, clean, and aggregate data in one prompt, the ETL agent can loop through multiple tool calls:
+For multi-stage requests, execution occurs sequentially so every stage is validated before the next dependent stage begins.
 
 ```text
 LLM
@@ -127,60 +114,39 @@ LLM
  ├── extract_load_tool
  │        ↓
  │      Bronze
+ │        ↓ success
  │
  ├── bronze_to_silver_tool
  │        ↓
  │      Silver
+ │        ↓ success
  │
  └── silver_to_gold_tool
           ↓
          Gold
 ```
 
-After every tool result, control returns to the ETL LLM so it can decide whether another valid stage is required or whether the workflow is complete.
+A tool failure stops the workflow deterministically. The LLM is not allowed to continue to downstream dependent stages after a failed tool call.
+
+![ETL Analyst Graph](etl_analyst_graph.png)
 
 ---
 
 ## Planner LLM vs Deterministic Executor
 
-Transformations are split into two responsibilities.
+Transformation planning and execution are intentionally separated.
 
 ### Planner LLM
 
-The planner receives:
+The planner receives the user transformation request plus dataset context and returns a validated Pydantic `TransformPlan`.
 
-```text
-user transformation request
-+
-dataset context
-```
+The planner is explicitly instructed not to write Python code, write shell commands, perform filesystem operations, invent column names, or reference columns missing from dataset metadata.
 
-and produces a structured Pydantic `TransformPlan`.
-
-The planner is explicitly instructed not to:
-
-- write Python code
-- write shell commands
-- perform filesystem operations
-- invent column names
-- reference columns that do not exist in dataset context
-
-It may create plans containing supported operations such as:
-
-- select columns
-- drop columns
-- rename columns
-- filter rows
-- drop duplicates
-- sort values
-- fill missing values
-- cast columns
-- string transformations
-- grouped aggregations
+Supported operations include column selection/removal, renaming, filtering, duplicate removal, sorting, missing-value handling, casting, string transformations, and grouped aggregations.
 
 ### Deterministic Executor
 
-`ETLTools.apply_transform_plan()` executes the validated plan using trusted Pandas implementations.
+`ETLTools` executes the validated plan through trusted Pandas implementations.
 
 ```text
 User request
@@ -198,148 +164,53 @@ ETLTools
 Deterministic Pandas operations
 ```
 
-There is no arbitrary:
-
-```python
-exec(...)
-```
-
-or unrestricted generated Python execution.
-
-The planner logic is shared by both Bronze → Silver and Silver → Gold workflows.
+There is no arbitrary `exec(...)` or unrestricted generated Python execution.
 
 ---
 
 # Phase 2A — Reliable API Ingestion ✅
 
-Phase 2A moved HTTP behavior out of the agent/tool layer and into a dedicated deterministic `APIClient`.
+Phase 2A moved HTTP behavior out of the agent layer and into a deterministic `APIClient`.
 
 ## 2A.1 — Dedicated API Client
 
-`utils/api_client.py` owns API communication and returns an `APIExtractionResult` containing:
+`utils/api_client.py` owns API communication and returns an `APIExtractionResult` containing `records` and `metadata`.
 
-```text
-records
-metadata
-```
-
-Important behavior includes:
-
-- top-level JSON array support
-- nested record-path support
-- relative pagination URLs
-- controlled JSON validation
-- normalized external API errors
-- metadata independent from agent reasoning
-
----
+Important behavior includes top-level JSON arrays and nested record paths, relative pagination URLs, controlled JSON validation, normalized external API errors, and metadata independent from agent reasoning.
 
 ## 2A.2 — Retry, Backoff, Rate Limits, and Authentication
 
-The API client implements bounded retry behavior for transient failures such as:
+The API client supports bounded retries for transient failures such as `429`, `500`, `502`, `503`, and `504`.
 
-```text
-429
-500
-502
-503
-504
-```
+It also supports exponential backoff, `Retry-After`, token authentication, configurable auth header/scheme, configurable user agent, and redirect limits.
 
-It also supports:
-
-- exponential retry backoff
-- `Retry-After` handling through the retry policy
-- optional token authentication
-- configurable auth header and scheme
-- configurable user agent
-- redirect limits
-
-Authenticated calls must use HTTPS.
-
-Credentials are loaded from application settings and are never supplied as free-form LLM output.
-
----
+Authenticated requests must use HTTPS.
 
 ## 2A.3 — Bounded Extraction
 
-API extraction is bounded by configured limits including:
-
-- request timeout
-- maximum response bytes
-- maximum total bytes across pagination
-- maximum pages
-- maximum records
-- maximum redirects
-- pagination loop detection
-
-Extraction metadata records values such as:
-
-```text
-pages_fetched
-records_extracted
-bytes_downloaded
-```
-
----
+Extraction is bounded by request timeout, maximum response bytes, maximum total bytes across pagination, maximum pages, maximum records, maximum redirects, and pagination-loop detection.
 
 ## 2A.4 — SSRF and Redirect Hardening
 
-Before a request is made, the destination is validated.
+Destination validation rejects unsafe targets including localhost, loopback, private, link-local, unspecified, multicast, and other non-public destinations.
 
-Unsafe destinations such as the following are rejected:
-
-- localhost
-- loopback addresses
-- private network addresses
-- link-local addresses
-- unspecified addresses
-- multicast addresses
-- other non-public destinations
-
-Redirect destinations are validated before being followed.
-
-Authenticated cross-origin flows are restricted to reduce credential-leak risk.
+Redirect destinations are validated before being followed, and authenticated cross-origin behavior is restricted.
 
 ---
 
 # Phase 2B — Persistent Incremental Ingestion ✅
 
-Phase 2B added durable watermark-based ingestion while preserving the rule:
+Phase 2B introduced durable watermark-based ingestion while preserving:
 
 > **Checkpoint state belongs to deterministic code, not the LLM.**
 
 ## 2B.1 — Persistent Checkpoint Store
 
-`utils/incremental_state.py` implements `IncrementalStateStore`.
+`utils/incremental_state.py` implements `IncrementalStateStore` under `data/_state/`.
 
-Checkpoints are stored under:
+The store provides restricted state keys, containment checks, atomic JSON persistence, controlled corrupted-state handling, and UTC timestamps.
 
-```text
-data/_state/
-```
-
-Important protections include:
-
-- restricted state-key format
-- path-containment checks
-- atomic JSON persistence
-- controlled handling of corrupted state
-- UTC update timestamps
-
-A checkpoint stores values such as:
-
-```text
-version
-state_key
-cursor_value
-updated_at
-metadata
-```
-
----
-
-## 2B.2 — Watermark-Aware API Extraction
+## 2B.2 — Watermark-Aware Extraction
 
 Incremental extraction uses:
 
@@ -349,7 +220,7 @@ watermark_field
 watermark_value
 ```
 
-The ownership split is intentional:
+Ownership is intentionally split:
 
 ```text
 LLM chooses:
@@ -361,66 +232,23 @@ Deterministic code loads/calculates:
     watermark_value
 ```
 
-The previous cursor is never exposed as an LLM-controlled argument.
-
-The API client also rejects:
-
-- incomplete incremental configuration
-- missing watermark fields
-- incompatible watermark types
-- watermark regression
-
----
+The LLM never supplies the previous cursor value.
 
 ## 2B.3 — Atomic and Idempotent Persistence
 
-Incremental writes follow a transaction-like order.
-
-Before Phase 2D lineage was added, the persistence contract was:
-
-```text
-load checkpoint
-      ↓
-extract records
-      ↓
-merge
-      ↓
-atomic dataset save
-      ↓
-schema history
-      ↓
-extraction metadata
-      ↓
-checkpoint
-```
-
-Retry safety currently uses exact-row deduplication.
-
-The project intentionally does not yet implement business-key upsert policies such as SCD Type 2.
-
----
+Retry safety currently uses exact-row deduplication. The checkpoint advances only after required durable writes succeed.
 
 ## 2B.4 — Agent-Safe Incremental Configuration
 
-The ETL extraction tool exposes only:
-
-```text
-state_key
-watermark_param
-watermark_field
-```
-
-It does not expose `watermark_value`.
-
-Checkpoint metadata also binds the state to the expected source and incremental configuration so the same key cannot silently be reused for a different pipeline.
+Checkpoint metadata binds state to its source and incremental configuration so a state key cannot silently be reused for a different pipeline.
 
 ---
 
 # Phase 2C — Schema Evolution ✅
 
-Phase 2C added deterministic schema comparison, safe additive evolution, schema history, and durable breaking-change rejection reports.
+Phase 2C added deterministic schema comparison, safe additive evolution, schema history, and durable breaking-change reports.
 
-The current source-ingestion policy is:
+The source-ingestion policy is:
 
 ```text
 same schema                 → ACCEPT
@@ -431,107 +259,29 @@ logical type changes        → REJECT
 
 The LLM does not decide whether a source schema transition is compatible.
 
----
-
 ## 2C.1 — Schema Drift Detection
 
-`utils/schema_evolution.py` contains deterministic schema comparison logic.
+`utils/schema_evolution.py` compares logical schemas and records added columns, removed columns, and type changes.
 
-`SchemaDiff` records:
-
-```text
-added_columns
-removed_columns
-type_changes
-```
-
-and exposes properties such as:
-
-```text
-has_changes
-is_additive_only
-is_breaking
-```
-
-Pandas dtypes are mapped into a smaller logical type model:
-
-```text
-boolean
-number
-datetime
-string
-object
-```
-
-Integer and floating-point values are both treated as `number`, avoiding false schema breaks for ordinary numeric widening.
-
----
+Pandas dtypes are normalized to `boolean`, `number`, `datetime`, `string`, and `object`.
 
 ## 2C.2 — Additive Evolution
 
-If a new API batch adds columns without removing or changing existing columns, the durable dataset evolves safely.
-
-Historical rows receive null values for the new columns.
-
-Existing column order is preserved and new columns are appended deterministically.
-
----
+New columns are accepted safely. Historical rows receive nulls for newly introduced columns while existing column order is preserved.
 
 ## 2C.3 — Schema History and Fingerprints
 
-Logical schemas are fingerprinted with SHA-256.
-
-Each Bronze dataset can persist:
-
-```text
-schema_history.json
-```
-
-with information including:
-
-- schema version
-- schema fingerprint
-- logical schema
-- timestamp
-- source URL
-
-Unchanged schemas do not create fake new versions.
-
----
+Each Bronze dataset can maintain `schema_history.json` with stable SHA-256 schema fingerprints and monotonically increasing schema versions.
 
 ## 2C.4 — Breaking-Change Rejection
 
-Breaking schema transitions raise `SchemaEvolutionError`, a structured `DatasetError` subtype.
+Breaking transitions raise `SchemaEvolutionError` and are persisted to `schema_change_rejections.json`.
 
-A durable report is written to:
-
-```text
-schema_change_rejections.json
-```
-
-Reports include information such as:
-
-- stable rejection ID
-- existing and incoming fingerprints
-- added columns
-- removed columns
-- type changes
-- complete old/new logical schemas
-- previous watermark
-- source URL
-- policy and rejection reason
-
-A stable transition fingerprint is used so repeated identical schema breaks do not create duplicate rejection events.
-
-Breaking changes are rejected before the durable dataset is replaced.
+Repeated identical breaking transitions use stable rejection fingerprints so duplicate rejection events are avoided.
 
 ---
 
 # Phase 2D — Medallion Architecture, Agent Integration, and Lineage ✅
-
-Phase 2D introduced a complete deterministic Bronze / Silver / Gold architecture and connected it to the ETL agent.
-
-The phase was implemented in four major steps:
 
 ```text
 2D.1  Deterministic Bronze layer          ✅
@@ -540,301 +290,69 @@ The phase was implemented in four major steps:
 2D.4  Agent integration + lineage         ✅
 ```
 
-The final architecture is:
+The resulting architecture is:
 
 ```text
-                       External API
-                           │
-                           │ extract_load_tool
-                           ▼
-                    ┌─────────────┐
-                    │   BRONZE    │
-                    │ source data │
-                    └──────┬──────┘
-                           │
-                           │ bronze_to_silver_tool
-                           │ Planner LLM → TransformPlan
-                           │ deterministic execution
-                           ▼
-                    ┌─────────────┐
-                    │   SILVER    │
-                    │ clean/model │
-                    └──────┬──────┘
-                           │
-                           │ silver_to_gold_tool
-                           │ Planner LLM → TransformPlan
-                           │ deterministic execution
-                           ▼
-                    ┌─────────────┐
-                    │    GOLD     │
-                    │ analytics   │
-                    └─────────────┘
-
-Every successful transition also writes deterministic lineage.
+External API
+    ↓
+ Bronze
+    ↓
+ Silver
+    ↓
+  Gold
 ```
-
-The layer responsibilities are:
-
-```text
-Bronze = source-oriented durable ingestion
-Silver = cleaned / standardized / transformed datasets
-Gold   = curated analytical or business-facing datasets
-```
-
----
 
 ## 2D.1 — Deterministic Bronze Layer
 
-`utils/data_layers.py` introduced the explicit `DataLayer` enum:
+`utils/data_layers.py` defines explicit `bronze`, `silver`, and `gold` layers.
 
-```text
-bronze
-silver
-gold
-```
+The agent chooses logical identifiers such as `orders`, `customers`, and `pokemon`, not physical paths.
 
-It also introduced deterministic logical dataset routing.
-
-### Logical dataset names instead of paths
-
-The agent chooses logical identifiers such as:
-
-```text
-orders
-customers
-pokemon
-```
-
-It does not choose paths such as:
-
-```text
-data/bronze/orders
-../../somewhere
-C:\arbitrary\path
-```
-
-`validate_dataset_name()` restricts dataset names and rejects path separators, hidden/path-like values, and unsafe names.
-
-`resolve_layer_dataset_directory()` deterministically maps a logical name to its layer location while enforcing path containment.
-
-For example:
-
-```text
-dataset_name = orders
-layer        = bronze
-```
-
-becomes:
-
-```text
-data/bronze/orders/
-```
-
-without giving the LLM control of the physical path.
-
-### Bronze output layout
-
-API extraction writes to:
+Bronze outputs are stored under:
 
 ```text
 data/bronze/<dataset>/
-    extracted_data.<csv|json|parquet>
+    extracted_data.<format>
     extraction_metadata.json
     schema_history.json
-    schema_change_rejections.json   # only when needed
+    schema_change_rejections.json   # when needed
 ```
 
-Bronze is source-aligned and durable. It is minimally normalized into tabular form, but transformation/business logic is intentionally deferred to downstream layers.
-
-### Checkpoint / Bronze binding
-
-Incremental checkpoint metadata records the logical dataset, physical output, source configuration, layer, schema version, fingerprint, and schema policy.
-
-A particularly important guard handles the case where a checkpoint exists but the associated Bronze dataset is missing.
-
-The system refuses to continue because using the old cursor without the old durable data could skip historical records.
-
-Conceptually:
-
-```text
-checkpoint exists
-+
-Bronze dataset missing
-        ↓
-      REJECT
-```
-
-rather than:
-
-```text
-reuse cursor
-↓
-skip old data
-```
-
----
+If an incremental checkpoint exists but the corresponding Bronze dataset is missing, ingestion is rejected to prevent historical data from being skipped.
 
 ## 2D.2 — Silver Transformation Layer
 
-Silver consumes **Bronze only**.
+Silver consumes Bronze only.
 
-The public deterministic method is:
+`_resolve_layer_dataset_file()` resolves exactly one physical dataset file for a logical dataset and rejects missing or ambiguous multi-format states.
 
-```text
-transform_bronze_to_silver(...)
-```
-
-The source is selected by logical dataset name rather than a user-controlled file path.
-
-### Deterministic layer file resolution
-
-`_resolve_layer_dataset_file()` resolves exactly one physical dataset file for a logical layer dataset.
-
-It supports:
-
-```text
-csv
-json
-parquet
-```
-
-and rejects two important invalid states:
-
-```text
-source dataset missing
-multiple physical formats for the same logical dataset
-```
-
-The second case matters because a logical dataset should not ambiguously resolve to both, for example:
-
-```text
-extracted_data.csv
-extracted_data.json
-```
-
-### Silver transformation contract
-
-The flow is:
-
-```text
-Bronze dataset
-      ↓
-load deterministic dataset context
-      ↓
-Planner LLM
-      ↓
-validated TransformPlan
-      ↓
-trusted Pandas implementation
-      ↓
-atomic Silver dataset save
-      ↓
-transformation metadata
-      ↓
-lineage event
-```
-
-Silver outputs are written to:
+Silver outputs are stored under:
 
 ```text
 data/silver/<dataset>/
-    transformed_data.<csv|json|parquet>
+    transformed_data.<format>
     transformation_metadata.json
 ```
 
-The metadata records details such as:
-
-- source dataset and layer
-- target dataset and layer
-- source file
-- source schema and fingerprint
-- output schema and fingerprint
-- input/output rows
-- input/output columns
-- output format
-- serialized `TransformPlan`
-- UTC transformation timestamp
-
-### Source schema policy vs transformation schema
-
-A subtle but important rule was kept explicit:
-
-```text
-Bronze schema = source-controlled
-Silver schema = transformation-controlled
-```
-
-The additive-only schema-evolution policy protects source ingestion.
-
-It does **not** prevent an intentional Silver transformation from dropping, renaming, casting, or aggregating columns when that change is explicitly represented in a validated `TransformPlan`.
-
-This keeps source-contract safety separate from intentional modeling logic.
-
-### Bronze immutability during Silver creation
-
-Silver transformations read Bronze and write a separate Silver dataset.
-
-Tests verify that producing Silver does not mutate the Bronze source.
-
----
+Silver transformation metadata records source/target layer information, row/column counts, schemas, fingerprints, output format, serialized `TransformPlan`, and UTC timestamps.
 
 ## 2D.3 — Gold Curated / Analytics Layer
 
-Gold consumes **Silver only**.
+Gold consumes Silver only.
 
-The public deterministic method is:
-
-```text
-transform_silver_to_gold(...)
-```
-
-This enforces the allowed dependency chain:
-
-```text
-External → Bronze → Silver → Gold
-```
-
-and avoids a direct Bronze → Gold shortcut.
-
-Gold uses the same validated `TransformPlan` mechanism, especially for business-oriented operations such as:
-
-- grouped aggregations
-- KPI preparation
-- business filters
-- reporting tables
-- curated analytical outputs
-
-Gold outputs are written to:
+Gold outputs are stored under:
 
 ```text
 data/gold/<dataset>/
-    curated_data.<csv|json|parquet>
+    curated_data.<format>
     curation_metadata.json
 ```
 
-Gold metadata records:
-
-- Silver source dataset/layer/file
-- target Gold dataset/layer
-- source and output schemas
-- source and output schema fingerprints
-- input/output rows
-- input/output columns
-- output format
-- serialized curation plan
-- UTC curation timestamp
-
-Silver remains unchanged while Gold is produced.
-
-Tests also reject missing or physically ambiguous Silver datasets.
-
----
+Gold is intended for curated analytical outputs, KPIs, business filters, aggregations, and reporting tables.
 
 ## 2D.4 — Agent Integration
 
-Once the deterministic Bronze, Silver, and Gold APIs were stable, the ETL agent was rewired around logical Medallion transitions.
-
-The active toolset is now:
+The active agent toolset is limited to:
 
 ```text
 extract_load_tool
@@ -842,102 +360,19 @@ bronze_to_silver_tool
 silver_to_gold_tool
 ```
 
-### No arbitrary transformation paths
-
-The previous generic transformation interface accepted arbitrary input/output path concepts.
-
-The agent-facing API now accepts logical dataset names instead.
-
-For example:
-
-```text
-source_dataset_name = orders
-target_dataset_name = clean_orders
-```
-
-instead of:
-
-```text
-input_file_path = data/bronze/orders/extracted_data.csv
-output_folder   = data/silver/clean_orders
-```
-
-The physical path remains application-controlled.
-
-### Reusable planner
-
-`create_transform_plan()` centralizes the LLM planning logic.
-
-Both Medallion transformations use the same pattern:
-
-```text
-logical source dataset
-        ↓
-get_layer_dataset_context()
-        ↓
-Planner LLM
-        ↓
-TransformPlan
-        ↓
-deterministic ETLTools method
-```
-
-`get_layer_dataset_context()` resolves the physical dataset internally, so the planner receives useful schema/context information without the agent choosing storage locations.
-
-### Multi-stage orchestration
-
-The ETL system prompt explicitly understands:
-
-```text
-External API
-    ↓
-Bronze
-    ↓
-Silver
-    ↓
-Gold
-```
-
-For a request requiring several stages, the agent is instructed to:
-
-1. execute extraction first
-2. continue to Bronze → Silver only after extraction succeeds
-3. continue to Silver → Gold only after Silver succeeds
-4. reuse the correct logical dataset names between stages
-5. stop downstream work if an earlier stage fails
-
-A single natural-language request can therefore orchestrate the whole pipeline.
-
----
+Physical storage paths are not exposed as agent choices.
 
 ## 2D.4 — Deterministic Lineage
 
-Phase 2D also added `utils/lineage.py` and the `LineageStore`.
-
-Lineage is intentionally written by deterministic application code after a successful durable operation.
-
-The LLM does **not** write lineage directly.
-
-Runtime lineage is stored under:
+`utils/lineage.py` implements `LineageStore` under:
 
 ```text
 data/_lineage/lineage.json
 ```
 
-The lineage document is versioned and contains an event history.
+Lineage is written by deterministic application code, never directly by the LLM.
 
-Each event contains values such as:
-
-```text
-event_id
-recorded_at
-operation
-source
-target
-metadata
-```
-
-Supported lineage operations are currently:
+Supported events are:
 
 ```text
 extract
@@ -945,99 +380,272 @@ transform
 curate
 ```
 
-### API → Bronze lineage
-
-Extraction lineage records:
-
-- source type = API
-- source URL
-- target layer = Bronze
-- target logical dataset
-- target schema fingerprint
-- output format
-
-### Bronze → Silver and Silver → Gold lineage
-
-Dataset transitions record:
-
-- source layer
-- source logical dataset
-- source schema fingerprint
-- target layer
-- target logical dataset
-- target schema fingerprint
-- output format
-- transformation-plan fingerprint
-
-The full transformation plan remains in the Silver/Gold metadata files.
-
-Lineage stores a stable SHA-256 fingerprint of the plan so the audit graph can identify which plan was used without duplicating the full plan payload in every lineage event.
-
-### Atomic lineage persistence
-
-The lineage document is loaded, extended with one event, written to a temporary file, and atomically replaced.
-
-Corrupted lineage documents are rejected with a controlled `DatasetError`.
-
-### Lineage is part of ingestion durability
-
-For incremental Bronze ingestion the final persistence order is now:
+For incremental ingestion, lineage is part of the durability contract:
 
 ```text
-API extraction
-      ↓
-tabular normalization
-      ↓
-incremental merge
-      ↓
 atomic Bronze dataset save
       ↓
 schema history persistence
       ↓
-atomic extraction metadata save
+extraction metadata save
       ↓
-lineage event persistence
+lineage persistence
       ↓
 checkpoint commit
 ```
 
-The checkpoint remains the final commit point.
-
-This was tested explicitly:
-
-```text
-lineage write fails
-        ↓
-checkpoint DOES NOT advance
-```
+A lineage failure therefore prevents checkpoint advancement.
 
 ---
 
-## Phase 2D Testing Details
+# Phase 2E — Agent Runtime Reliability, Observability, and CI ✅
 
-Important tests include:
+Phase 2E moved reliability guarantees above the deterministic ETL engine and into the agent runtime itself.
 
-- Bronze extraction writes only to Bronze
-- Silver requires an existing Bronze dataset
-- Gold requires an existing Silver dataset
-- Silver creation does not mutate Bronze
-- Gold creation does not mutate Silver
-- ambiguous physical source formats are rejected
-- metadata records source and target layers
-- transformation and curation plans are persisted
-- full API → Bronze → Silver → Gold lineage integration
-- lineage fingerprint stability
-- corrupted lineage rejection
-- lineage failure prevents checkpoint advancement
-- test fixture isolation for `LineageStore`
+```text
+2E.1  Deterministic agent orchestration tests   ✅
+2E.2  Failure-stop and loop/runtime guards      ✅
+2E.3  Structured execution observability        ✅
+2E.4  GitHub Actions CI                         ✅
+```
 
-The pytest fixture rebinds path-bound helpers such as `LineageStore` after changing `data_root`, preventing tests from touching real runtime lineage.
+## 2E.1 — Deterministic Agent Orchestration Tests
+
+`tests/test_etl_agent.py` executes the real compiled ETL LangGraph while replacing external LLM/tool dependencies with deterministic fakes.
+
+The tests verify exact Bronze → Silver → Gold tool ordering, graph continuation after successful tool calls, dataset-name propagation, final graph termination, the active Medallion-only tool registry, and absence of the legacy generic transformation tool.
+
+```text
+real graph runtime        ✅
+real routing logic        ✅
+real tool-node logic      ✅
+real external LLM call    ❌ mocked
+real external API call    ❌ mocked
+```
+
+## 2E.2 — Deterministic Runtime Safety Guards
+
+Prompt instructions alone are not considered sufficient to guarantee safe orchestration.
+
+The ETL state now tracks:
+
+```text
+run_id
+tool_call_count
+workflow_failed
+failure_reason
+```
+
+### One dependent tool call per turn
+
+A single LLM response may not execute multiple dependent ETL stages at once.
+
+```text
+LLM → one tool
+        ↓
+validate result
+        ↓
+LLM → next tool
+```
+
+Multiple tool calls in one turn are rejected deterministically.
+
+### Tool-call budget
+
+`ETL_MAX_TOOL_CALLS` bounds the number of tool executions in one ETL-agent run.
+
+The default configuration is:
+
+```text
+ETL_MAX_TOOL_CALLS=8
+```
+
+This prevents an unbounded tool loop.
+
+### Immediate failure stop
+
+Unknown or unauthorized tools are rejected.
+
+If a tool raises an exception, the workflow is marked failed and routed to a deterministic terminal failure node.
+
+```text
+required tool fails
+       ↓
+workflow_failed = true
+       ↓
+failure node
+       ↓
+END
+```
+
+The agent is not given another opportunity to continue to a dependent downstream stage.
+
+## 2E.3 — Structured Execution Observability
+
+Lineage answers:
+
+```text
+Where did this dataset come from?
+```
+
+Execution observability answers:
+
+```text
+What happened during this particular agent run?
+```
+
+`utils/execution_observability.py` implements `ExecutionRunStore` under:
+
+```text
+data/_runs/
+```
+
+Each ETL invocation receives a UUID-backed `run_id` and a separate run record.
+
+A run tracks:
+
+```text
+run_version
+run_id
+agent
+status
+started_at
+completed_at
+max_tool_calls
+failure_reason
+events
+```
+
+Run lifecycle states:
+
+```text
+running
+completed
+failed
+```
+
+Tool event states:
+
+```text
+success
+failed
+rejected
+```
+
+Each event records sequence number, event type, tool name, status, timestamps, duration, and allowlisted operational metadata.
+
+### Sensitive-data minimization
+
+Raw prompts and raw tool arguments are deliberately not persisted in execution logs.
+
+The observability layer uses an allowlist of operational fields such as logical dataset names, output format, pagination flag, state key, and watermark configuration.
+
+Raw user transformation questions and raw API URLs are intentionally excluded.
+
+### Observability failure semantics
+
+Execution observability is diagnostic rather than transactional.
+
+```text
+observability write failure
+        ↓
+log warning
+        ↓
+do NOT convert a successful ETL tool into a failed ETL operation
+```
+
+This differs from lineage, which participates in the incremental-ingestion durability contract.
+
+### Test isolation
+
+Agent tests replace the runtime `ExecutionRunStore` with one rooted in pytest's temporary directory.
+
+Tests explicitly verify:
+
+```text
+successful workflow → status = completed
+failed workflow     → status = failed
+```
+
+Failure tests also verify a completion timestamp, failure reason, and failed tool event.
+
+## 2E.4 — GitHub Actions CI
+
+The repository now contains:
+
+```text
+.github/workflows/ci.yml
+```
+
+CI runs automatically on:
+
+```text
+push to main
+pull request targeting main
+```
+
+The workflow performs:
+
+```text
+checkout
+   ↓
+install uv
+   ↓
+install Python 3.12
+   ↓
+uv sync --locked
+   ↓
+Ruff
+   ↓
+pytest
+   ↓
+uv build
+```
+
+It uses read-only repository permissions and concurrency cancellation for superseded runs.
+
+### No production LLM credentials in CI
+
+Some agent modules construct provider clients at import time. CI therefore supplies dummy key strings only so deterministic tests can import those modules.
+
+The tests replace the real orchestration LLM before any external request is made.
+
+```text
+GitHub Actions
+      ↓
+dummy provider key strings
+      ↓
+module import
+      ↓
+FakeLLM in tests
+      ↓
+no live OpenAI/Anthropic call
+```
+
+The Phase 2E CI pipeline has been verified successfully on GitHub Actions.
+
+---
+
+# Three Runtime Persistence Concerns
+
+The project now separates three different operational questions:
+
+```text
+data/_state/
+    → Where should incremental ingestion resume?
+
+data/_lineage/
+    → Which source/transformation produced this dataset?
+
+data/_runs/
+    → What happened during this specific ETL-agent execution?
+```
 
 ---
 
 # Current ETL Durability Model
 
-The complete successful incremental path is now:
+Successful incremental ingestion follows:
 
 ```text
 load checkpoint
@@ -1061,15 +669,15 @@ lineage persistence
 checkpoint commit
 ```
 
-For breaking source schema changes, execution exits before the durable dataset is replaced.
+Breaking schema changes exit before replacing the durable dataset.
 
-For lineage failure, execution exits before checkpoint advancement.
+Lineage failure exits before checkpoint advancement.
+
+Execution-observability failure does not invalidate otherwise successful ETL execution because observability is diagnostic rather than part of the data commit contract.
 
 ---
 
 # Runtime Data Layout
-
-Runtime data is intentionally ignored by Git.
 
 ```text
 data/
@@ -1077,6 +685,8 @@ data/
 │   └── <state_key>.json
 ├── _lineage/
 │   └── lineage.json
+├── _runs/
+│   └── <run_id>.json
 ├── bronze/
 │   └── <dataset>/
 │       ├── extracted_data.<format>
@@ -1093,7 +703,7 @@ data/
         └── curation_metadata.json
 ```
 
-The entire `data/` directory is in `.gitignore` because it contains generated runtime data, state, lineage, and environment-specific metadata.
+The entire `data/` directory is ignored by Git because it contains generated runtime data and metadata.
 
 ---
 
@@ -1101,22 +711,13 @@ The entire `data/` directory is in `.gitignore` because it contains generated ru
 
 The SQL agent converts natural-language analytical questions into PostgreSQL queries.
 
-Generated SQL is **not trusted directly**.
+Generated SQL is not trusted directly.
 
-Before reaching PostgreSQL, queries are parsed with SQLGlot and inspected as an AST.
+Before execution, SQL is parsed with SQLGlot and inspected as an AST.
 
-The validation layer:
+The validation layer allows exactly one statement, permits read-only query expressions, rejects DML/DDL/multi-statement SQL, rejects invalid SQL, and inspects nested operations and CTEs for hidden writes.
 
-- allows exactly one statement
-- permits read-only query expressions
-- rejects DML
-- rejects DDL
-- rejects multi-statement SQL
-- rejects invalid SQL
-- inspects nested operations
-- inspects CTEs for hidden writes
-
-Database execution adds another layer of protection:
+Database execution adds another safety layer:
 
 ```text
 Generated SQL
@@ -1135,6 +736,8 @@ Read-only PostgreSQL transaction
 Analytics result
 ```
 
+![SQL Analyst Graph](sql_analyst_graph.png)
+
 ---
 
 # Project Structure
@@ -1142,6 +745,9 @@ Analytics result
 ```text
 Autonomous-data-engineer-agent/
 │
+├── .github/
+│   └── workflows/
+│       └── ci.yml
 ├── agents/
 │   ├── data_engineer.py
 │   ├── etl_analyst.py
@@ -1156,6 +762,7 @@ Autonomous-data-engineer-agent/
 │   ├── database.py
 │   ├── etl_tools.py
 │   ├── exceptions.py
+│   ├── execution_observability.py
 │   ├── incremental_state.py
 │   ├── lineage.py
 │   ├── llm_pick.py
@@ -1166,6 +773,7 @@ Autonomous-data-engineer-agent/
 │   ├── test_api_client.py
 │   ├── test_data_layers.py
 │   ├── test_database.py
+│   ├── test_etl_agent.py
 │   ├── test_etl_tools.py
 │   ├── test_incremental_state.py
 │   ├── test_lineage.py
@@ -1194,6 +802,7 @@ Autonomous-data-engineer-agent/
 - SQLGlot
 - Pydantic / Pydantic Settings
 - pytest / Ruff / uv
+- GitHub Actions
 
 ---
 
@@ -1205,15 +814,23 @@ cd Autonomous-data-engineer-agent
 uv sync --locked
 ```
 
-Copy `.env.example` to `.env` and configure your LLM/database credentials.
+Copy `.env.example` to `.env` and configure the required LLM/database credentials.
 
 Never commit a real `.env` file.
 
 ---
 
-# Running the System
+# Runtime Safety Configuration
 
-Run the complete Data Engineer router:
+```env
+ETL_MAX_TOOL_CALLS=8
+```
+
+This bounds the number of ETL tool executions permitted in one agent run.
+
+---
+
+# Running the System
 
 ```bash
 uv run python main.py
@@ -1231,6 +848,30 @@ uv run python -m agents.sql_analyst
 
 # Testing
 
+Important coverage includes:
+
+- API destination validation and SSRF protection
+- pagination, retries, limits, and HTTP failure normalization
+- watermark-based incremental extraction
+- checkpoint durability and source/config binding
+- schema drift classification and additive evolution
+- breaking-schema rejection reports
+- Bronze / Silver / Gold routing and metadata
+- deterministic transformation plans
+- full Medallion lineage integration
+- lineage failure / checkpoint protection
+- agent tool-order orchestration
+- logical dataset-name propagation
+- active-tool allowlist
+- one-tool-per-turn enforcement
+- tool-call budget enforcement
+- deterministic stop after tool failure
+- structured successful-run observability
+- structured failed-run observability
+- execution-store test isolation
+- raw URL exclusion from execution logs
+- SQL AST safety and read-only execution
+
 Run all tests:
 
 ```bash
@@ -1243,26 +884,58 @@ Run Ruff:
 uv run ruff check .
 ```
 
-A clean local validation is:
+Build:
+
+```bash
+uv build
+```
+
+Complete local quality gate:
 
 ```bash
 uv sync --locked
-uv run pytest -v
 uv run ruff check .
+uv run pytest -v
 uv build
 ```
+
+GitHub Actions runs the same quality checks automatically for pushes and pull requests targeting `main`.
+
+---
+
+# Current Safety Model
+
+The project treats LLM output as untrusted input.
+
+The LLM does not directly control:
+
+- arbitrary Python execution
+- arbitrary local filesystem paths
+- Bronze/Silver/Gold physical locations
+- API authentication tokens
+- checkpoint cursor values
+- checkpoint persistence timing
+- schema compatibility decisions
+- schema-rejection policy
+- lineage file contents
+- direct Bronze → Gold transitions
+- an unlimited ETL tool loop
+- continuation after a failed required tool
+
+SQL remains protected by SQLGlot AST validation and read-only PostgreSQL execution.
 
 ---
 
 # Current Limitations
 
-- incremental retry idempotency currently uses exact-row equality rather than business-key upserts
-- breaking source schema changes are rejected rather than auto-migrated
-- optional fields disappearing for an entire batch may look like schema removal
+- incremental retry idempotency uses exact-row equality rather than business-key upserts
+- breaking source schema changes are rejected instead of automatically migrated
+- optional fields disappearing from an entire batch may appear as schema removal
 - response-size limits are not yet enforced while streaming the body
-- dataset contracts do not yet include keys, nullability, semantic types, or business descriptions
-- lineage currently uses one file-based JSON history and is not designed for high-concurrency distributed writes
-- deterministic agent-runtime orchestration tests and CI belong to the next phase
+- dataset contracts do not yet model keys, nullability, semantic types, uniqueness, or business descriptions
+- lineage uses a single JSON history and is not designed for highly concurrent distributed writers
+- execution observability is local file-based rather than backed by a centralized metrics/tracing platform
+- agent-behavior tests are deterministic graph tests; broader live-LLM evaluation remains a later concern
 
 ---
 
@@ -1272,7 +945,7 @@ uv build
 
 ### Phase 2A — Reliable API ingestion
 
-- ✅ APIClient
+- ✅ dedicated `APIClient`
 - ✅ pagination / retries / rate-limit handling
 - ✅ authenticated APIs
 - ✅ extraction limits
@@ -1299,41 +972,50 @@ uv build
 
 - ✅ deterministic DataLayer routing
 - ✅ safe logical dataset names
-- ✅ Bronze ingestion layer
-- ✅ Silver transformation layer
-- ✅ Gold analytics layer
+- ✅ Bronze ingestion
+- ✅ Silver transformations
+- ✅ Gold analytics outputs
 - ✅ planner / executor separation
 - ✅ Medallion agent tools
 - ✅ multi-stage ETL orchestration
 - ✅ deterministic lineage
-- ✅ plan/schema fingerprints
+- ✅ schema / plan fingerprints
 - ✅ lineage-before-checkpoint durability
 - ✅ full Medallion lineage integration tests
-- ✅ runtime data excluded from Git
+
+### Phase 2E — Agent runtime reliability and CI
+
+- ✅ deterministic ETL-agent graph tests
+- ✅ active tool-surface tests
+- ✅ one-tool-per-turn enforcement
+- ✅ configurable ETL tool-call budget
+- ✅ deterministic failure-stop routing
+- ✅ terminal success/failure run states
+- ✅ structured `_runs/` execution observability
+- ✅ event timing and allowlisted metadata
+- ✅ raw prompt / raw tool-argument minimization
+- ✅ successful and failed execution-record tests
+- ✅ isolated observability test storage
+- ✅ GitHub Actions CI
+- ✅ automated Ruff / pytest / build quality gates
 
 ---
 
-## Next Phase — 2E Agent Runtime Reliability & CI
+## Next Candidates
 
-```text
-2E.1  Deterministic agent orchestration tests
-2E.2  Failure-stop and loop/runtime guards
-2E.3  Structured execution observability
-2E.4  GitHub Actions CI
-```
+The next major work should shift back toward data-engineering capability. Strong candidates include:
 
-Later candidates:
-
-- data-quality validation
-- business-key upserts
-- richer dataset contracts
+- data-quality validation and dataset contracts
+- configurable business-key upserts
+- richer dataset metadata
 - dbt integration
 - workflow orchestration
 - Docker
-- tracing
-- LLM evaluation
+- richer lineage backends
+- centralized tracing / metrics
+- live LLM evaluation
 - LLM cost monitoring
-- streaming response-size enforcement
+- streamed response-size enforcement
 
 ---
 
