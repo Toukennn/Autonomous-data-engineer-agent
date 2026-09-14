@@ -33,6 +33,8 @@ class ETLAgentSchema(BaseModel):
         default_factory=list
     )
 
+    run_id: str = ""
+
     tool_call_count: int = 0
 
     workflow_failed: bool = False

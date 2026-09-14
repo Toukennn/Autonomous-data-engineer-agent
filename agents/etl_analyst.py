@@ -15,6 +15,39 @@ from config.settings import (
     get_runtime_settings,
 )
 
+import logging
+
+from datetime import (
+    datetime,
+    timezone,
+)
+from time import perf_counter
+from uuid import uuid4
+
+from utils.execution_observability import (
+    ExecutionRunStore,
+)
+
+runtime_settings = (
+    get_runtime_settings()
+)
+
+ETL_MAX_TOOL_CALLS = (
+    runtime_settings
+    .etl_max_tool_calls
+)
+
+execution_store = (
+    ExecutionRunStore(
+        runtime_settings.data_root
+    )
+)
+
+logger = logging.getLogger(
+    __name__
+)
+
+
 def create_transform_plan(
     *,
     user_question: str,
@@ -72,6 +105,91 @@ Rules:
     return planner_llm.invoke(
         prompt
     )
+
+
+# A safe metadata helper
+def _safe_tool_metadata(
+    tool_name: str,
+    args: dict,
+) -> dict:
+    """
+    Return only non-sensitive operational
+    metadata for execution observability.
+    """
+
+    allowed_fields = {
+        "extract_load_tool": {
+            "dataset_name",
+            "format",
+            "paginate",
+            "state_key",
+            "watermark_param",
+            "watermark_field",
+        },
+        "bronze_to_silver_tool": {
+            "source_dataset_name",
+            "target_dataset_name",
+            "output_format",
+        },
+        "silver_to_gold_tool": {
+            "source_dataset_name",
+            "target_dataset_name",
+            "output_format",
+        },
+    }
+
+    allowed = (
+        allowed_fields.get(
+            tool_name,
+            set(),
+        )
+    )
+
+    return {
+        key: args[key]
+        for key in allowed
+        if key in args
+    }
+
+
+# we do not want an observability write failure to invalidate a successfully executed ETL operation.
+def _record_event_safely(
+    **kwargs,
+) -> None:
+    try:
+        execution_store.record_event(
+            **kwargs
+        )
+
+    except Exception as exc:
+        logger.warning(
+            "Failed to persist ETL "
+            "execution event: %s",
+            exc,
+        )
+
+
+def _complete_run_safely(
+    *,
+    run_id: str,
+    status: str,
+    failure_reason: str | None = None,
+) -> None:
+    try:
+        execution_store.complete_run(
+            run_id=run_id,
+            status=status,
+            failure_reason=(
+                failure_reason
+            ),
+        )
+
+    except Exception as exc:
+        logger.warning(
+            "Failed to finalize ETL "
+            "execution run: %s",
+            exc,
+        )
 
 
 # ============================================================
@@ -340,11 +458,6 @@ def silver_to_gold_tool(
 # TOOLKIT
 # ============================================================
 
-ETL_MAX_TOOL_CALLS = (
-    get_runtime_settings()
-    .etl_max_tool_calls
-)
-
 tools = [
     extract_load_tool,
     bronze_to_silver_tool,
@@ -371,6 +484,41 @@ etl_llm_with_tools = etl_llm.bind_tools(
 # ============================================================
 # GRAPH NODES
 # ============================================================
+
+def initialize_run_node(
+    state: ETLAgentSchema,
+):
+    """
+    Initialize structured observability for
+    one ETL-agent invocation.
+    """
+
+    if state.run_id:
+        return {}
+
+    run_id = str(
+        uuid4()
+    )
+
+    try:
+        execution_store.start_run(
+            run_id=run_id,
+            max_tool_calls=(
+                ETL_MAX_TOOL_CALLS
+            ),
+        )
+
+    except Exception as exc:
+        logger.warning(
+            "Failed to initialize ETL "
+            "execution observability: %s",
+            exc,
+        )
+
+    return {
+        "run_id": run_id
+    }
+
 
 def llm_node(state: ETLAgentSchema):
     """
@@ -622,6 +770,16 @@ def tool_node(
     # EXECUTION
     # ============================================================
 
+    started_at = (
+        datetime.now(
+            timezone.utc
+        ).isoformat()
+    )
+
+    started_clock = (
+        perf_counter()
+    )
+
     try:
         result = (
             selected_tool.invoke(
@@ -630,6 +788,39 @@ def tool_node(
         )
 
     except Exception as exc:
+
+        completed_at = (
+            datetime.now(
+                timezone.utc
+            ).isoformat()
+        )
+
+        duration_ms = (
+            (
+                perf_counter()
+                - started_clock
+            )
+            * 1000
+        )
+
+        _record_event_safely(
+            run_id=state.run_id,
+            event_type="tool",
+            name=tool_name,
+            status="failed",
+            started_at=started_at,
+            completed_at=completed_at,
+            duration_ms=duration_ms,
+            metadata={
+                **_safe_tool_metadata(
+                    tool_name,
+                    tool_call["args"],
+                ),
+                "error_type": (
+                    type(exc).__name__
+                ),
+            },
+        )
 
         reason = (
             f"{tool_name} failed: "
@@ -657,6 +848,42 @@ def tool_node(
             "failure_reason": reason,
         }
 
+
+    # ============================================================
+    # SUCCESS OBSERVABILITY
+    # ============================================================
+
+    completed_at = (
+        datetime.now(
+            timezone.utc
+        ).isoformat()
+    )
+
+    duration_ms = (
+        (
+            perf_counter()
+            - started_clock
+        )
+        * 1000
+    )
+
+    _record_event_safely(
+        run_id=state.run_id,
+        event_type="tool",
+        name=tool_name,
+        status="success",
+        started_at=started_at,
+        completed_at=completed_at,
+        duration_ms=duration_ms,
+        metadata=(
+            _safe_tool_metadata(
+                tool_name,
+                tool_call["args"],
+            )
+        ),
+    )
+
+
     # ============================================================
     # SUCCESS
     # ============================================================
@@ -679,7 +906,6 @@ def tool_node(
         "failure_reason": "",
     }
 
-
 def failure_node(
     state: ETLAgentSchema,
 ):
@@ -693,6 +919,14 @@ def failure_node(
     reason = (
         state.failure_reason
         or "Unknown ETL workflow failure."
+    )
+
+    _complete_run_safely(
+        run_id=state.run_id,
+        status="failed",
+        failure_reason=(
+            state.failure_reason
+        ),
     )
 
     return {
@@ -709,6 +943,21 @@ def failure_node(
             )
         ]
     }
+
+
+def complete_run_node(
+    state: ETLAgentSchema,
+):
+    """
+    Finalize a successful ETL-agent run.
+    """
+
+    _complete_run_safely(
+        run_id=state.run_id,
+        status="completed",
+    )
+
+    return {}
 
 # ============================================================
 # ROUTING
@@ -746,7 +995,7 @@ def route_after_llm(
     if tool_calls:
         return "tools"
 
-    return "end"
+    return "complete"
 
 
 
@@ -756,6 +1005,11 @@ def route_after_llm(
 
 etl_graph = StateGraph(
     ETLAgentSchema
+)
+
+etl_graph.add_node(
+    "initialize",
+    initialize_run_node,
 )
 
 etl_graph.add_node(
@@ -769,26 +1023,48 @@ etl_graph.add_node(
 )
 
 etl_graph.add_node(
+    "complete",
+    complete_run_node,
+)
+
+etl_graph.add_node(
     "failure",
     failure_node,
 )
 
 
+# ============================================================
+# ENTRY
+# ============================================================
+
 etl_graph.add_edge(
     START,
+    "initialize",
+)
+
+etl_graph.add_edge(
+    "initialize",
     "llm",
 )
 
+
+# ============================================================
+# AFTER LLM
+# ============================================================
 
 etl_graph.add_conditional_edges(
     "llm",
     route_after_llm,
     {
         "tools": "tools",
-        "end": END,
+        "complete": "complete",
     },
 )
 
+
+# ============================================================
+# AFTER TOOL EXECUTION
+# ============================================================
 
 etl_graph.add_conditional_edges(
     "tools",
@@ -799,13 +1075,29 @@ etl_graph.add_conditional_edges(
     },
 )
 
+
+# ============================================================
+# TERMINAL NODES
+# ============================================================
+
+etl_graph.add_edge(
+    "complete",
+    END,
+)
+
 etl_graph.add_edge(
     "failure",
     END,
 )
 
 
-etl_analyst = etl_graph.compile()
+# ============================================================
+# COMPILE
+# ============================================================
+
+etl_analyst = (
+    etl_graph.compile()
+)
 
 
 # ============================================================

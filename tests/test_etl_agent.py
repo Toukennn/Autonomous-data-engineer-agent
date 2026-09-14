@@ -1,3 +1,9 @@
+import pytest
+
+from utils.execution_observability import (
+    ExecutionRunStore,
+)
+
 from langchain_core.messages import (
     AIMessage,
     HumanMessage,
@@ -5,6 +11,27 @@ from langchain_core.messages import (
 
 import agents.etl_analyst as etl_module
 
+@pytest.fixture(
+    autouse=True
+)
+def isolated_execution_store(
+    tmp_path,
+    monkeypatch,
+):
+    store = (
+        ExecutionRunStore(
+            tmp_path
+            / "data"
+        )
+    )
+
+    monkeypatch.setattr(
+        etl_module,
+        "execution_store",
+        store,
+    )
+
+    return store
 
 class FakeLLM:
     """
@@ -547,4 +574,114 @@ def test_etl_agent_rejects_multiple_tool_calls_per_turn(
         in result[
             "messages"
         ][-1].content.lower()
+    )
+
+
+def test_etl_agent_records_structured_execution(
+    monkeypatch,
+    isolated_execution_store,
+):
+    calls = []
+
+    fake_llm = FakeLLM(
+        [
+            make_tool_call(
+                name="extract_load_tool",
+                call_id="extract",
+                args={
+                    "url": (
+                        "https://example.com/orders"
+                    ),
+                    "dataset_name": (
+                        "orders"
+                    ),
+                },
+            ),
+            AIMessage(
+                content="Completed."
+            ),
+        ]
+    )
+
+    monkeypatch.setattr(
+        etl_module,
+        "etl_llm_with_tools",
+        fake_llm,
+    )
+
+    monkeypatch.setattr(
+        etl_module,
+        "tools_by_name",
+        {
+            "extract_load_tool": FakeTool(
+                "extract_load_tool",
+                calls,
+                "Bronze completed.",
+            )
+        },
+    )
+
+    result = (
+        etl_module.etl_analyst.invoke(
+            {
+                "messages": [
+                    HumanMessage(
+                        content=(
+                            "Extract orders."
+                        )
+                    )
+                ]
+            }
+        )
+    )
+
+    run_id = result["run_id"]
+
+    execution = (
+        isolated_execution_store
+        .get_run(
+            run_id
+        )
+    )
+
+    assert (
+        execution["status"]
+        == "failed"
+    )
+
+    assert len(
+        execution["events"]
+    ) == 1
+
+    event = (
+        execution["events"][0]
+    )
+
+    assert (
+        event["name"]
+        == "extract_load_tool"
+    )
+
+    assert (
+        event["status"]
+        == "success"
+    )
+
+    assert (
+        event["duration_ms"]
+        >= 0
+    )
+
+    assert (
+        event["metadata"][
+            "dataset_name"
+        ]
+        == "orders"
+    )
+
+    # Raw API URLs are deliberately
+    # not persisted in execution logs.
+    assert (
+        "https://example.com/orders"
+        not in str(execution)
     )
