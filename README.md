@@ -139,8 +139,6 @@ LLM
 
 After every tool result, control returns to the ETL LLM so it can decide whether another valid stage is required or whether the workflow is complete.
 
-![ETL Analyst Graph](etl_analyst_graph.png)
-
 ---
 
 ## Planner LLM vs Deterministic Executor
@@ -1136,8 +1134,6 @@ Read-only PostgreSQL transaction
       ▼
 Analytics result
 ```
-
-![SQL Analyst Graph](sql_analyst_graph.png)
 
 ---
 
