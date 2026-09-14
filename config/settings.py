@@ -168,6 +168,12 @@ class RuntimeSettings(_BaseAppSettings):
         le=20,
     )
 
+    etl_max_tool_calls: int = Field(
+        default=8,
+        validation_alias="ETL_MAX_TOOL_CALLS",
+        ge=1,
+        le=50,
+    )
 
 class LLMSettings(_BaseAppSettings):
     """

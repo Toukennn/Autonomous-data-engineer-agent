@@ -1,5 +1,8 @@
 from langchain.tools import tool
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    ToolMessage,
+)
 from langgraph.graph import END, START, StateGraph
 
 from models.schema import ETLAgentSchema, TransformPlan
@@ -7,6 +10,10 @@ from utils.etl_tools import ETLTools
 from utils.llm_pick import pick_llm
 
 from utils.data_layers import DataLayer
+
+from config.settings import (
+    get_runtime_settings,
+)
 
 def create_transform_plan(
     *,
@@ -333,6 +340,11 @@ def silver_to_gold_tool(
 # TOOLKIT
 # ============================================================
 
+ETL_MAX_TOOL_CALLS = (
+    get_runtime_settings()
+    .etl_max_tool_calls
+)
+
 tools = [
     extract_load_tool,
     bronze_to_silver_tool,
@@ -456,12 +468,23 @@ def llm_node(state: ETLAgentSchema):
     }
 
 
-def tool_node(state: ETLAgentSchema):
+def tool_node(
+    state: ETLAgentSchema,
+):
     """
-    Execute tool calls requested by the ETL LLM.
+    Execute exactly one ETL tool call.
+
+    Safety guarantees:
+
+    - dependent ETL operations execute sequentially
+    - unknown tools terminate the workflow
+    - tool failures terminate the workflow
+    - total tool executions are bounded
     """
 
-    last_message = state.messages[-1]
+    last_message = (
+        state.messages[-1]
+    )
 
     tool_calls = getattr(
         last_message,
@@ -469,53 +492,240 @@ def tool_node(state: ETLAgentSchema):
         [],
     )
 
-    tool_messages = []
+    # ============================================================
+    # DEFENSIVE CHECK
+    # ============================================================
 
-    for tool_call in tool_calls:
+    if not tool_calls:
+        return {
+            "workflow_failed": True,
+            "failure_reason": (
+                "Tool node was entered without "
+                "a tool call."
+            ),
+        }
 
-        tool_name = tool_call["name"]
+    # ============================================================
+    # ONE DEPENDENT TOOL PER TURN
+    # ============================================================
 
-        if tool_name not in tools_by_name:
-            tool_messages.append(
-                ToolMessage(
-                    content=f"Unknown tool requested: {tool_name}",
-                    tool_call_id=tool_call["id"],
-                )
+    if len(tool_calls) != 1:
+
+        reason = (
+            "ETL orchestration requires exactly "
+            "one tool call per agent turn so each "
+            "dependent stage can be validated before "
+            "the next stage begins."
+        )
+
+        tool_messages = [
+            ToolMessage(
+                content=(
+                    f"Tool execution rejected: "
+                    f"{reason}"
+                ),
+                tool_call_id=(
+                    tool_call["id"]
+                ),
             )
-
-            continue
-
-        selected_tool = tools_by_name[
-            tool_name
+            for tool_call in tool_calls
         ]
 
-        try:
-            result = selected_tool.invoke(
+        return {
+            "messages": tool_messages,
+            "workflow_failed": True,
+            "failure_reason": reason,
+        }
+
+    tool_call = tool_calls[0]
+
+    next_count = (
+        state.tool_call_count
+        + 1
+    )
+
+    # ============================================================
+    # TOOL-CALL BUDGET
+    # ============================================================
+
+    if (
+        next_count
+        > ETL_MAX_TOOL_CALLS
+    ):
+
+        reason = (
+            "ETL tool-call limit exceeded. "
+            f"Maximum allowed: "
+            f"{ETL_MAX_TOOL_CALLS}."
+        )
+
+        return {
+            "messages": [
+                ToolMessage(
+                    content=(
+                        "Tool execution rejected: "
+                        f"{reason}"
+                    ),
+                    tool_call_id=(
+                        tool_call["id"]
+                    ),
+                )
+            ],
+            "tool_call_count": (
+                next_count
+            ),
+            "workflow_failed": True,
+            "failure_reason": reason,
+        }
+
+    tool_name = (
+        tool_call["name"]
+    )
+
+    # ============================================================
+    # TOOL ALLOWLIST
+    # ============================================================
+
+    if (
+        tool_name
+        not in tools_by_name
+    ):
+
+        reason = (
+            "Unknown or unauthorized ETL "
+            f"tool requested: {tool_name}"
+        )
+
+        return {
+            "messages": [
+                ToolMessage(
+                    content=reason,
+                    tool_call_id=(
+                        tool_call["id"]
+                    ),
+                )
+            ],
+            "tool_call_count": (
+                next_count
+            ),
+            "workflow_failed": True,
+            "failure_reason": reason,
+        }
+
+    selected_tool = (
+        tools_by_name[
+            tool_name
+        ]
+    )
+
+    # ============================================================
+    # EXECUTION
+    # ============================================================
+
+    try:
+        result = (
+            selected_tool.invoke(
                 tool_call["args"]
-            )
-
-        except Exception as exc:
-            result = (
-                f"Tool execution failed: "
-                f"{type(exc).__name__}: {exc}"
-            )
-
-        tool_messages.append(
-            ToolMessage(
-                content=str(result),
-                tool_call_id=tool_call["id"],
             )
         )
 
-    # Again, return ONLY the new messages.
+    except Exception as exc:
+
+        reason = (
+            f"{tool_name} failed: "
+            f"{type(exc).__name__}: "
+            f"{exc}"
+        )
+
+        return {
+            "messages": [
+                ToolMessage(
+                    content=(
+                        "Tool execution failed: "
+                        f"{type(exc).__name__}: "
+                        f"{exc}"
+                    ),
+                    tool_call_id=(
+                        tool_call["id"]
+                    ),
+                )
+            ],
+            "tool_call_count": (
+                next_count
+            ),
+            "workflow_failed": True,
+            "failure_reason": reason,
+        }
+
+    # ============================================================
+    # SUCCESS
+    # ============================================================
+
     return {
-        "messages": tool_messages
+        "messages": [
+            ToolMessage(
+                content=str(
+                    result
+                ),
+                tool_call_id=(
+                    tool_call["id"]
+                ),
+            )
+        ],
+        "tool_call_count": (
+            next_count
+        ),
+        "workflow_failed": False,
+        "failure_reason": "",
     }
 
+
+def failure_node(
+    state: ETLAgentSchema,
+):
+    """
+    Return a deterministic final response after
+    a guarded ETL workflow failure.
+
+    No additional LLM call is made.
+    """
+
+    reason = (
+        state.failure_reason
+        or "Unknown ETL workflow failure."
+    )
+
+    return {
+        "messages": [
+            AIMessage(
+                content=(
+                    "The ETL workflow stopped "
+                    "safely because a required "
+                    "stage failed.\n\n"
+                    f"Reason: {reason}\n\n"
+                    "No downstream ETL stages "
+                    "were executed after the failure."
+                )
+            )
+        ]
+    }
 
 # ============================================================
 # ROUTING
 # ============================================================
+
+def route_after_tools(
+    state: ETLAgentSchema,
+) -> str:
+    """
+    Continue only after a successful tool call.
+    """
+
+    if state.workflow_failed:
+        return "failure"
+
+    return "llm"
+
 
 def route_after_llm(
     state: ETLAgentSchema,
@@ -539,6 +749,7 @@ def route_after_llm(
     return "end"
 
 
+
 # ============================================================
 # GRAPH
 # ============================================================
@@ -555,6 +766,11 @@ etl_graph.add_node(
 etl_graph.add_node(
     "tools",
     tool_node,
+)
+
+etl_graph.add_node(
+    "failure",
+    failure_node,
 )
 
 
@@ -574,9 +790,18 @@ etl_graph.add_conditional_edges(
 )
 
 
-etl_graph.add_edge(
+etl_graph.add_conditional_edges(
     "tools",
-    "llm",
+    route_after_tools,
+    {
+        "llm": "llm",
+        "failure": "failure",
+    },
+)
+
+etl_graph.add_edge(
+    "failure",
+    END,
 )
 
 

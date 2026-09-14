@@ -26,7 +26,18 @@ class JudgeSchema(BaseModel):
 
 
 class ETLAgentSchema(BaseModel):
-    messages: Annotated[list[AnyMessage], add_messages] = Field(default_factory=list)
+    messages: Annotated[
+        list[AnyMessage],
+        add_messages,
+    ] = Field(
+        default_factory=list
+    )
+
+    tool_call_count: int = 0
+
+    workflow_failed: bool = False
+
+    failure_reason: str = ""
 
 
 class RouterSchema(BaseModel):

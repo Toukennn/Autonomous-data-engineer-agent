@@ -271,3 +271,280 @@ def test_etl_agent_exposes_only_medallion_tools():
         "transform_load_tool"
         not in etl_module.tools_by_name
     )
+
+
+
+class FailingTool:
+    def __init__(
+        self,
+        name,
+        calls,
+    ):
+        self.name = name
+        self.calls = calls
+
+    def invoke(
+        self,
+        args,
+    ):
+        self.calls.append(
+            {
+                "name": self.name,
+                "args": args,
+            }
+        )
+
+        raise RuntimeError(
+            "simulated failure"
+        )
+
+
+
+def test_etl_agent_stops_after_tool_failure(
+    monkeypatch,
+):
+    calls = []
+
+    fake_llm = FakeLLM(
+        [
+            make_tool_call(
+                name="extract_load_tool",
+                call_id="extract",
+                args={
+                    "url": (
+                        "https://example.com/orders"
+                    ),
+                    "dataset_name": "orders",
+                },
+            ),
+
+            # This response must NEVER be consumed.
+            make_tool_call(
+                name="bronze_to_silver_tool",
+                call_id="silver",
+                args={
+                    "source_dataset_name": (
+                        "orders"
+                    ),
+                    "user_question": (
+                        "Clean orders."
+                    ),
+                },
+            ),
+        ]
+    )
+
+    monkeypatch.setattr(
+        etl_module,
+        "etl_llm_with_tools",
+        fake_llm,
+    )
+
+    monkeypatch.setattr(
+        etl_module,
+        "tools_by_name",
+        {
+            "extract_load_tool": (
+                FailingTool(
+                    "extract_load_tool",
+                    calls,
+                )
+            ),
+        },
+    )
+
+    result = (
+        etl_module.etl_analyst.invoke(
+            {
+                "messages": [
+                    HumanMessage(
+                        content=(
+                            "Extract and clean orders."
+                        )
+                    )
+                ]
+            }
+        )
+    )
+
+    assert [
+        call["name"]
+        for call in calls
+    ] == [
+        "extract_load_tool"
+    ]
+
+    assert (
+        "stopped safely"
+        in result[
+            "messages"
+        ][-1].content.lower()
+    )
+
+
+
+def test_etl_agent_stops_at_tool_call_limit(
+    monkeypatch,
+):
+    calls = []
+
+    monkeypatch.setattr(
+        etl_module,
+        "ETL_MAX_TOOL_CALLS",
+        2,
+    )
+
+    fake_llm = FakeLLM(
+        [
+            make_tool_call(
+                name="extract_load_tool",
+                call_id="call-1",
+                args={
+                    "url": "https://example.com/a",
+                    "dataset_name": "a",
+                },
+            ),
+            make_tool_call(
+                name="extract_load_tool",
+                call_id="call-2",
+                args={
+                    "url": "https://example.com/b",
+                    "dataset_name": "b",
+                },
+            ),
+            make_tool_call(
+                name="extract_load_tool",
+                call_id="call-3",
+                args={
+                    "url": "https://example.com/c",
+                    "dataset_name": "c",
+                },
+            ),
+        ]
+    )
+
+    monkeypatch.setattr(
+        etl_module,
+        "etl_llm_with_tools",
+        fake_llm,
+    )
+
+    fake_tool = FakeTool(
+        name="extract_load_tool",
+        calls=calls,
+        result="ok",
+    )
+
+    monkeypatch.setattr(
+        etl_module,
+        "tools_by_name",
+        {
+            "extract_load_tool": (
+                fake_tool
+            ),
+        },
+    )
+
+    result = (
+        etl_module.etl_analyst.invoke(
+            {
+                "messages": [
+                    HumanMessage(
+                        content="Loop forever."
+                    )
+                ]
+            }
+        )
+    )
+
+    assert len(calls) == 2
+
+    assert (
+        "limit exceeded"
+        in result[
+            "messages"
+        ][-1].content.lower()
+    )
+
+
+
+def test_etl_agent_rejects_multiple_tool_calls_per_turn(
+    monkeypatch,
+):
+    calls = []
+
+    response = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "extract_load_tool",
+                "args": {
+                    "url": (
+                        "https://example.com/orders"
+                    ),
+                    "dataset_name": "orders",
+                },
+                "id": "extract",
+                "type": "tool_call",
+            },
+            {
+                "name": "bronze_to_silver_tool",
+                "args": {
+                    "source_dataset_name": (
+                        "orders"
+                    ),
+                    "user_question": (
+                        "Clean orders."
+                    ),
+                },
+                "id": "silver",
+                "type": "tool_call",
+            },
+        ],
+    )
+
+    monkeypatch.setattr(
+        etl_module,
+        "etl_llm_with_tools",
+        FakeLLM([response]),
+    )
+
+    monkeypatch.setattr(
+        etl_module,
+        "tools_by_name",
+        {
+            "extract_load_tool": FakeTool(
+                "extract_load_tool",
+                calls,
+                "ok",
+            ),
+            "bronze_to_silver_tool": FakeTool(
+                "bronze_to_silver_tool",
+                calls,
+                "ok",
+            ),
+        },
+    )
+
+    result = (
+        etl_module.etl_analyst.invoke(
+            {
+                "messages": [
+                    HumanMessage(
+                        content=(
+                            "Extract and clean orders."
+                        )
+                    )
+                ]
+            }
+        )
+    )
+
+    assert calls == []
+
+    assert (
+        "exactly one tool call"
+        in result[
+            "messages"
+        ][-1].content.lower()
+    )
