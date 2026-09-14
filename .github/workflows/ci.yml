@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Tests, Lint, Build
+
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 15
+
+    env:
+      # Dummy values only.
+      #
+      # Some agent modules construct LLM clients at import time.
+      # The deterministic tests replace those clients before any
+      # external LLM request occurs.
+      #
+      # Do NOT put real API credentials in this workflow.
+      ANTHROPIC_API_KEY: sk-ant-test
+      OPENAI_API_KEY: sk-test
+
+      ETL_MAX_TOOL_CALLS: "8"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.1.0
+        with:
+          enable-cache: true
+          version: latest-known
+
+      - name: Install Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Run Ruff
+        run: uv run ruff check .
+
+      - name: Run tests
+        run: uv run pytest -v
+
+      - name: Build package
+        run: uv build
