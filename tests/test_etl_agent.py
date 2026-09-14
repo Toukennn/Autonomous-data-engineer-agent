@@ -329,6 +329,7 @@ class FailingTool:
 
 def test_etl_agent_stops_after_tool_failure(
     monkeypatch,
+    isolated_execution_store,
 ):
     calls = []
 
@@ -408,6 +409,38 @@ def test_etl_agent_stops_after_tool_failure(
         ][-1].content.lower()
     )
 
+    run_id = result["run_id"]
+
+    execution = (
+        isolated_execution_store
+        .get_run(
+            run_id
+        )
+    )
+
+    assert (
+        execution["status"]
+        == "failed"
+    )
+
+    assert (
+        execution["completed_at"]
+        is not None
+    )
+
+    assert (
+        execution["failure_reason"]
+        is not None
+    )
+
+    assert len(
+        execution["events"]
+    ) == 1
+
+    assert (
+        execution["events"][0]["status"]
+        == "failed"
+    )
 
 
 def test_etl_agent_stops_at_tool_call_limit(
@@ -646,7 +679,7 @@ def test_etl_agent_records_structured_execution(
 
     assert (
         execution["status"]
-        == "failed"
+        == "completed"
     )
 
     assert len(
