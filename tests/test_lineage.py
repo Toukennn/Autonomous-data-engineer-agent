@@ -339,4 +339,131 @@ def test_lineage_rejects_failed_quality_gate(
     )
 
 
+def test_lineage_records_warehouse_sync(
+    tmp_path,
+):
+    store = LineageStore(
+        tmp_path / "data"
+    )
 
+    event_id = (
+        store.record_warehouse_sync(
+            source_dataset=(
+                "orders"
+            ),
+            source_schema_fingerprint=(
+                "schema123"
+            ),
+            warehouse_schema=(
+                "bronze"
+            ),
+            warehouse_table=(
+                "orders"
+            ),
+            row_count=25,
+            column_count=4,
+        )
+    )
+
+    assert event_id
+
+    events = (
+        store.get_events()
+    )
+
+    assert len(events) == 1
+
+    event = events[0]
+
+    assert (
+        event["operation"]
+        == "warehouse_sync"
+    )
+
+    assert (
+        event["source"][
+            "layer"
+        ]
+        == "bronze"
+    )
+
+    assert (
+        event["source"][
+            "dataset"
+        ]
+        == "orders"
+    )
+
+    assert (
+        event["source"][
+            "schema_fingerprint"
+        ]
+        == "schema123"
+    )
+
+    assert (
+        event["target"][
+            "type"
+        ]
+        == "warehouse_table"
+    )
+
+    assert (
+        event["target"][
+            "schema"
+        ]
+        == "bronze"
+    )
+
+    assert (
+        event["target"][
+            "table"
+        ]
+        == "orders"
+    )
+
+    assert (
+        event["metadata"][
+            "load_mode"
+        ]
+        == "replace"
+    )
+
+    assert (
+        event["metadata"][
+            "row_count"
+        ]
+        == 25
+    )
+
+
+
+def test_warehouse_sync_lineage_rejects_non_bronze_schema(
+    tmp_path,
+):
+    store = LineageStore(
+        tmp_path / "data"
+    )
+
+    with pytest.raises(
+        DatasetError,
+        match=(
+            "must target the "
+            "Bronze schema"
+        ),
+    ):
+        store.record_warehouse_sync(
+            source_dataset="orders",
+            source_schema_fingerprint=(
+                "schema123"
+            ),
+            warehouse_schema="public",
+            warehouse_table="orders",
+            row_count=10,
+            column_count=2,
+        )
+
+    assert (
+        store.get_events()
+        == []
+    )

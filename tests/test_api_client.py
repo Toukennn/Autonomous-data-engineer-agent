@@ -270,6 +270,14 @@ def test_timeout_becomes_external_api_error(
     ):
         raise requests.Timeout()
 
+    # This test verifies HTTP timeout normalization,
+    # not SSRF/DNS validation.
+    monkeypatch.setattr(
+        api_client,
+        "_validate_public_destination",
+        lambda url: None,
+    )
+
     monkeypatch.setattr(
         api_client.session,
         "get",
@@ -280,11 +288,11 @@ def test_timeout_becomes_external_api_error(
         ExternalAPIError,
         match="timed out",
     ):
-        api_client._request_json(
-            "https://example.com/api",
-            {},
+        api_client.extract_records(
+            url=(
+                "https://example.com/api"
+            )
         )
-
 
 def test_invalid_json_is_rejected(
     api_client,

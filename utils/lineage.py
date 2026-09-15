@@ -50,11 +50,11 @@ class LineageStore:
     """
 
     LINEAGE_VERSION = 1
-
     _ALLOWED_OPERATIONS = {
         "extract",
         "transform",
         "curate",
+        "warehouse_sync",
     }
 
     def __init__(
@@ -299,6 +299,105 @@ class LineageStore:
                 ),
             },
         )
+
+
+    def record_warehouse_sync(
+        self,
+        *,
+        source_dataset: str,
+        source_schema_fingerprint: str,
+        warehouse_schema: str,
+        warehouse_table: str,
+        row_count: int,
+        column_count: int,
+    ) -> str:
+        """
+        Record successful materialization of a durable
+        Bronze dataset into the PostgreSQL warehouse.
+
+        This is not a Medallion transformation.
+        The logical data remains Bronze; only its
+        physical execution/storage backend changes.
+        """
+
+        if warehouse_schema != (
+            DataLayer.BRONZE.value
+        ):
+            raise DatasetError(
+                "Bronze warehouse synchronization "
+                "must target the Bronze schema."
+            )
+
+        if (
+            not isinstance(
+                row_count,
+                int,
+            )
+            or isinstance(
+                row_count,
+                bool,
+            )
+            or row_count < 0
+        ):
+            raise DatasetError(
+                "Warehouse lineage row count "
+                "must be a non-negative integer."
+            )
+
+        if (
+            not isinstance(
+                column_count,
+                int,
+            )
+            or isinstance(
+                column_count,
+                bool,
+            )
+            or column_count < 1
+        ):
+            raise DatasetError(
+                "Warehouse lineage column count "
+                "must be a positive integer."
+            )
+
+        return self._append_event(
+            operation=(
+                "warehouse_sync"
+            ),
+            source={
+                "type": "dataset",
+                "layer": (
+                    DataLayer.BRONZE.value
+                ),
+                "dataset": (
+                    source_dataset
+                ),
+                "schema_fingerprint": (
+                    source_schema_fingerprint
+                ),
+            },
+            target={
+                "type": (
+                    "warehouse_table"
+                ),
+                "schema": (
+                    warehouse_schema
+                ),
+                "table": (
+                    warehouse_table
+                ),
+            },
+            metadata={
+                "load_mode": "replace",
+                "row_count": (
+                    row_count
+                ),
+                "column_count": (
+                    column_count
+                ),
+            },
+        )
+    
 
     def record_transition(
         self,

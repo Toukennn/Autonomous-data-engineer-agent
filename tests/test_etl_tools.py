@@ -3157,6 +3157,96 @@ def test_bronze_dataset_loads_to_warehouse(
         in result
     )
 
+    metadata_file = (
+        isolated_etl_tools.data_root
+        / "bronze"
+        / "orders"
+        / "warehouse_sync_metadata.json"
+    )
+
+    assert metadata_file.exists()
+
+    with metadata_file.open(
+        "r",
+        encoding="utf-8",
+    ) as file:
+        metadata = json.load(
+            file
+        )
+
+    assert (
+        metadata["dataset"]
+        == "orders"
+    )
+
+    assert (
+        metadata["source_layer"]
+        == "bronze"
+    )
+
+    assert (
+        metadata["source_file"]
+        == (
+            "bronze/orders/"
+            "extracted_data.csv"
+        )
+    )
+
+    assert (
+        metadata[
+            "warehouse_schema"
+        ]
+        == "bronze"
+    )
+
+    assert (
+        metadata[
+            "warehouse_table"
+        ]
+        == "orders"
+    )
+
+    assert (
+        metadata[
+            "load_mode"
+        ]
+        == "replace"
+    )
+
+    assert (
+        metadata["rows_loaded"]
+        == 2
+    )
+
+    events = (
+        isolated_etl_tools
+        .lineage_store
+        .get_events()
+    )
+
+    assert len(events) == 1
+
+    assert (
+        events[0][
+            "operation"
+        ]
+        == "warehouse_sync"
+    )
+
+    assert (
+        events[0][
+            "target"
+        ][
+            "table"
+        ]
+        == "orders"
+    )
+
+    assert (
+        "Lineage event:"
+        in result
+    )
+
 
 
 def test_warehouse_bridge_requires_bronze_dataset(
@@ -3256,4 +3346,84 @@ def test_etl_tools_does_not_initialize_warehouse_eagerly(
         isolated_etl_tools
         ._warehouse_loader
         is None
+    )
+
+
+
+def test_warehouse_sync_metadata_failure_prevents_lineage(
+    isolated_etl_tools,
+    monkeypatch,
+):
+    bronze_directory = (
+        isolated_etl_tools.data_root
+        / "bronze"
+        / "orders"
+    )
+
+    bronze_directory.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    pd.DataFrame(
+        {
+            "id": [1],
+        }
+    ).to_csv(
+        bronze_directory
+        / "extracted_data.csv",
+        index=False,
+    )
+
+    warehouse = (
+        FakeWarehouseLoader()
+    )
+
+    isolated_etl_tools\
+        ._warehouse_loader = (
+            warehouse
+        )
+
+    def fail_metadata(
+        payload,
+        file_path,
+    ):
+        raise DatasetError(
+            "simulated metadata failure"
+        )
+
+    monkeypatch.setattr(
+        isolated_etl_tools,
+        "_save_json_atomic",
+        fail_metadata,
+    )
+
+    with pytest.raises(
+        DatasetError,
+        match=(
+            "simulated metadata failure"
+        ),
+    ):
+        isolated_etl_tools\
+            .load_bronze_to_warehouse(
+                dataset_name=(
+                    "orders"
+                ),
+            )
+
+    # Warehouse load already succeeded.
+    assert (
+        len(
+            warehouse.calls
+        )
+        == 1
+    )
+
+    # But governance was incomplete,
+    # so no successful lineage is written.
+    assert (
+        isolated_etl_tools
+        .lineage_store
+        .get_events()
+        == []
     )

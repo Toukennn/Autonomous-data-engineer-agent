@@ -588,18 +588,19 @@ class ETLTools:
         Physical source-file resolution and target
         relation placement are application-controlled.
 
-        The caller provides only a logical dataset
-        identifier.
+        Successful synchronization persists local
+        warehouse-sync metadata and lineage.
 
-        Example:
+        Note:
+            PostgreSQL and the local filesystem cannot
+            participate in one atomic transaction.
 
-            orders
+            The PostgreSQL load therefore commits first.
+            Governance metadata and lineage are persisted
+            only after that successful database commit.
 
-        becomes:
-
-            data/bronze/orders/extracted_data.*
-                    ↓
-            PostgreSQL bronze.orders
+            A retry is safe because the warehouse load
+            uses deterministic table replacement.
         """
 
         safe_dataset_name = (
@@ -614,11 +615,15 @@ class ETLTools:
 
         source_file = (
             self._resolve_layer_dataset_file(
-                layer=DataLayer.BRONZE,
+                layer=(
+                    DataLayer.BRONZE
+                ),
                 dataset_name=(
                     safe_dataset_name
                 ),
-                file_stem="extracted_data",
+                file_stem=(
+                    "extracted_data"
+                ),
             )
         )
 
@@ -669,6 +674,121 @@ class ETLTools:
         )
 
         # ============================================================
+        # WAREHOUSE SYNC METADATA
+        # ============================================================
+
+        bronze_directory = (
+            resolve_layer_dataset_directory(
+                data_root=(
+                    self.data_root
+                ),
+                layer=(
+                    DataLayer.BRONZE
+                ),
+                dataset_name=(
+                    safe_dataset_name
+                ),
+            )
+        )
+
+        metadata_file = (
+            bronze_directory
+            / "warehouse_sync_metadata.json"
+        )
+
+        try:
+            relative_source_file = (
+                source_file
+                .relative_to(
+                    self.data_root
+                )
+                .as_posix()
+            )
+
+        except ValueError as exc:
+            raise DatasetError(
+                "Bronze source file escaped "
+                "the configured data directory."
+            ) from exc
+
+        sync_metadata = {
+            "metadata_version": 1,
+            "synced_at": (
+                datetime.now(
+                    timezone.utc
+                ).isoformat()
+            ),
+            "dataset": (
+                safe_dataset_name
+            ),
+            "source_layer": (
+                DataLayer.BRONZE.value
+            ),
+            "source_file": (
+                relative_source_file
+            ),
+            "source_schema": (
+                source_schema
+            ),
+            "source_schema_fingerprint": (
+                source_schema_fingerprint
+            ),
+            "warehouse_schema": (
+                result.schema
+            ),
+            "warehouse_table": (
+                result.table
+            ),
+            "load_mode": "replace",
+            "rows_loaded": (
+                result.row_count
+            ),
+            "columns_loaded": (
+                result.column_count
+            ),
+            "columns": list(
+                result.columns
+            ),
+        }
+
+        self._save_json_atomic(
+            payload=(
+                sync_metadata
+            ),
+            file_path=(
+                metadata_file
+            ),
+        )
+
+        # ============================================================
+        # LINEAGE
+        # ============================================================
+
+        lineage_event_id = (
+            self.lineage_store
+            .record_warehouse_sync(
+                source_dataset=(
+                    safe_dataset_name
+                ),
+                source_schema_fingerprint=(
+                    source_schema_fingerprint
+                ),
+                warehouse_schema=(
+                    result.schema
+                ),
+                warehouse_table=(
+                    result.table
+                ),
+                row_count=(
+                    result.row_count
+                ),
+                column_count=(
+                    result.column_count
+                ),
+            )
+        )
+
+        # ============================================================
         # RESULT
         # ============================================================
 
@@ -678,7 +798,8 @@ class ETLTools:
             f"Dataset: {safe_dataset_name}\n"
             f"Source layer: "
             f"{DataLayer.BRONZE.value}\n"
-            f"Source file: {source_file}\n"
+            f"Source file: "
+            f"{relative_source_file}\n"
             f"Source schema fingerprint: "
             f"{source_schema_fingerprint}\n"
             f"Warehouse relation: "
@@ -687,9 +808,12 @@ class ETLTools:
             f"Rows loaded: "
             f"{result.row_count}\n"
             f"Columns loaded: "
-            f"{result.column_count}"
+            f"{result.column_count}\n"
+            f"Sync metadata: "
+            f"{metadata_file}\n"
+            f"Lineage event: "
+            f"{lineage_event_id}"
         )
-
 
     def _resolve_layer_dataset_file(
         self,
