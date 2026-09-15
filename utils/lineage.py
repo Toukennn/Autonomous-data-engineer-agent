@@ -312,9 +312,21 @@ class LineageStore:
         target_schema_fingerprint: str,
         plan_payload: dict,
         output_format: str,
+        quality_contract_fingerprint: (
+            str | None
+        ) = None,
+        quality_result: (
+            dict | None
+        ) = None,
     ) -> str:
         """
-        Record a deterministic dataset-to-dataset transition.
+        Record a successful deterministic
+        dataset-to-dataset transition.
+
+        When a quality contract governs the
+        promotion, lineage records a compact
+        summary proving which contract authorized
+        the durable output.
         """
 
         if operation not in {
@@ -331,6 +343,112 @@ class LineageStore:
                 plan_payload
             )
         )
+
+        # ============================================================
+        # QUALITY LINEAGE
+        # ============================================================
+
+        contract_configured = (
+            quality_contract_fingerprint
+            is not None
+        )
+
+        if (
+            contract_configured
+            != (
+                quality_result
+                is not None
+            )
+        ):
+            raise DatasetError(
+                "Lineage quality metadata is "
+                "incomplete. Contract fingerprint "
+                "and quality result must either "
+                "both be present or both be absent."
+            )
+
+        if quality_result is not None:
+
+            passed = (
+                quality_result.get(
+                    "passed"
+                )
+            )
+
+            total_checks = (
+                quality_result.get(
+                    "total_checks"
+                )
+            )
+
+            failed_checks = (
+                quality_result.get(
+                    "failed_checks"
+                )
+            )
+
+            if passed is not True:
+                raise DatasetError(
+                    "Successful lineage cannot be "
+                    "written for a failed "
+                    "data-quality gate."
+                )
+
+            if (
+                not isinstance(
+                    total_checks,
+                    int,
+                )
+                or isinstance(
+                    total_checks,
+                    bool,
+                )
+                or total_checks < 0
+            ):
+                raise DatasetError(
+                    "Invalid quality total-check "
+                    "count for lineage."
+                )
+
+            if (
+                not isinstance(
+                    failed_checks,
+                    int,
+                )
+                or isinstance(
+                    failed_checks,
+                    bool,
+                )
+                or failed_checks < 0
+            ):
+                raise DatasetError(
+                    "Invalid quality failed-check "
+                    "count for lineage."
+                )
+
+            quality_metadata = {
+                "contract_configured": True,
+                "contract_fingerprint": (
+                    quality_contract_fingerprint
+                ),
+                "passed": True,
+                "total_checks": (
+                    total_checks
+                ),
+                "failed_checks": (
+                    failed_checks
+                ),
+            }
+
+        else:
+
+            quality_metadata = {
+                "contract_configured": False,
+                "contract_fingerprint": None,
+                "passed": None,
+                "total_checks": None,
+                "failed_checks": None,
+            }
 
         return self._append_event(
             operation=operation,
@@ -365,8 +483,12 @@ class LineageStore:
                 "output_format": (
                     output_format
                 ),
+                "quality_gate": (
+                    quality_metadata
+                ),
             },
         )
+
 
     def get_events(
         self,

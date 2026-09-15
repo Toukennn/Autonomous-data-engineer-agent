@@ -3025,6 +3025,12 @@ class ETLTools:
                 output_format=(
                     file_format
                 ),
+                quality_contract_fingerprint=(
+                    quality_contract_fingerprint_value
+                ),
+                quality_result=(
+                    quality_result
+                ),
             )
         )
 
@@ -3353,6 +3359,12 @@ class ETLTools:
                 ),
                 output_format=(
                     file_format
+                ),
+                quality_contract_fingerprint=(
+                    quality_contract_fingerprint_value
+                ),
+                quality_result=(
+                    quality_result
                 ),
             )
         )

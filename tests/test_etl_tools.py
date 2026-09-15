@@ -2627,6 +2627,44 @@ def test_silver_quality_gate_passes(
 
     assert silver_file.exists()
 
+    events = (
+        isolated_etl_tools
+        .lineage_store
+        .get_events()
+    )
+
+    assert len(events) == 1
+
+    quality = (
+        events[0]
+        ["metadata"]
+        ["quality_gate"]
+    )
+
+    assert (
+        quality[
+            "contract_configured"
+        ]
+        is True
+    )
+
+    assert (
+        quality["passed"]
+        is True
+    )
+
+    assert (
+        quality[
+            "contract_fingerprint"
+        ]
+        is not None
+    )
+
+    assert (
+        quality["failed_checks"]
+        == 0
+    )
+
 
 
 def test_silver_quality_failure_does_not_overwrite_existing_dataset(

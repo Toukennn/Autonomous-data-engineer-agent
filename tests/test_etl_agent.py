@@ -11,6 +11,10 @@ from langchain_core.messages import (
 
 import agents.etl_analyst as etl_module
 
+from utils.exceptions import (
+    DataQualityError,
+)
+
 @pytest.fixture(
     autouse=True
 )
@@ -845,4 +849,177 @@ def test_etl_agent_configures_quality_before_silver(
     assert (
         result["messages"][-1].content
         == "Completed."
+    )
+
+
+class QualityFailingTool:
+    def __init__(
+        self,
+        name,
+        calls,
+    ):
+        self.name = name
+        self.calls = calls
+
+    def invoke(
+        self,
+        args,
+    ):
+        self.calls.append(
+            {
+                "name": self.name,
+                "args": args,
+            }
+        )
+
+        raise DataQualityError(
+            (
+                "Candidate silver dataset "
+                "failed quality."
+            ),
+            details={
+                "layer": "silver",
+                "dataset": (
+                    "clean_orders"
+                ),
+                "contract_name": (
+                    "clean_orders_quality"
+                ),
+                "contract_version": 1,
+                "contract_fingerprint": (
+                    "quality123"
+                ),
+                "quality_result": {
+                    "passed": False,
+                    "total_checks": 3,
+                    "failed_checks": 1,
+                    "checks": [],
+                },
+            },
+        )
+
+
+def test_quality_failure_is_recorded_safely(
+    monkeypatch,
+    isolated_execution_store,
+):
+    calls = []
+
+    raw_requirement = (
+        "Clean the private orders and "
+        "require amount >= 0."
+    )
+
+    fake_llm = FakeLLM(
+        [
+            make_tool_call(
+                name=(
+                    "bronze_to_silver_tool"
+                ),
+                call_id="silver",
+                args={
+                    "source_dataset_name": (
+                        "orders"
+                    ),
+                    "target_dataset_name": (
+                        "clean_orders"
+                    ),
+                    "user_question": (
+                        raw_requirement
+                    ),
+                    "output_format": "csv",
+                },
+            ),
+        ]
+    )
+
+    monkeypatch.setattr(
+        etl_module,
+        "etl_llm_with_tools",
+        fake_llm,
+    )
+
+    monkeypatch.setattr(
+        etl_module,
+        "tools_by_name",
+        {
+            "bronze_to_silver_tool": (
+                QualityFailingTool(
+                    "bronze_to_silver_tool",
+                    calls,
+                )
+            )
+        },
+    )
+
+    result = (
+        etl_module.etl_analyst
+        .invoke(
+            {
+                "messages": [
+                    HumanMessage(
+                        content=(
+                            "Run the Silver "
+                            "transformation."
+                        )
+                    )
+                ]
+            }
+        )
+    )
+
+    execution = (
+        isolated_execution_store
+        .get_run(
+            result["run_id"]
+        )
+    )
+
+    assert (
+        execution["status"]
+        == "failed"
+    )
+
+    event = (
+        execution["events"][0]
+    )
+
+    assert (
+        event["metadata"][
+            "error_type"
+        ]
+        == "DataQualityError"
+    )
+
+    quality = (
+        event["metadata"][
+            "quality_gate"
+        ]
+    )
+
+    assert (
+        quality["dataset"]
+        == "clean_orders"
+    )
+
+    assert (
+        quality[
+            "contract_fingerprint"
+        ]
+        == "quality123"
+    )
+
+    assert (
+        quality["total_checks"]
+        == 3
+    )
+
+    assert (
+        quality["failed_checks"]
+        == 1
+    )
+
+    assert (
+        raw_requirement
+        not in str(execution)
     )

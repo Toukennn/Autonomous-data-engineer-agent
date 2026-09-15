@@ -206,3 +206,137 @@ def test_corrupted_lineage_is_rejected(
 
 
 
+def test_lineage_records_quality_gate(
+    tmp_path,
+):
+    store = LineageStore(
+        tmp_path / "data"
+    )
+
+    store.record_transition(
+        operation="transform",
+        source_layer=(
+            DataLayer.BRONZE
+        ),
+        source_dataset="orders",
+        source_schema_fingerprint=(
+            "source123"
+        ),
+        target_layer=(
+            DataLayer.SILVER
+        ),
+        target_dataset="clean_orders",
+        target_schema_fingerprint=(
+            "target456"
+        ),
+        plan_payload={
+            "operations": [],
+            "summary": "Test",
+        },
+        output_format="csv",
+        quality_contract_fingerprint=(
+            "quality123"
+        ),
+        quality_result={
+            "passed": True,
+            "total_checks": 3,
+            "failed_checks": 0,
+            "checks": [],
+        },
+    )
+
+    event = (
+        store.get_events()[0]
+    )
+
+    quality = (
+        event["metadata"][
+            "quality_gate"
+        ]
+    )
+
+    assert (
+        quality[
+            "contract_configured"
+        ]
+        is True
+    )
+
+    assert (
+        quality[
+            "contract_fingerprint"
+        ]
+        == "quality123"
+    )
+
+    assert (
+        quality["passed"]
+        is True
+    )
+
+    assert (
+        quality["total_checks"]
+        == 3
+    )
+
+    assert (
+        quality["failed_checks"]
+        == 0
+    )
+
+
+
+def test_lineage_rejects_failed_quality_gate(
+    tmp_path,
+):
+    store = LineageStore(
+        tmp_path / "data"
+    )
+
+    with pytest.raises(
+        DatasetError,
+        match=(
+            "Successful lineage cannot"
+        ),
+    ):
+        store.record_transition(
+            operation="transform",
+            source_layer=(
+                DataLayer.BRONZE
+            ),
+            source_dataset="orders",
+            source_schema_fingerprint=(
+                "source123"
+            ),
+            target_layer=(
+                DataLayer.SILVER
+            ),
+            target_dataset=(
+                "clean_orders"
+            ),
+            target_schema_fingerprint=(
+                "target456"
+            ),
+            plan_payload={
+                "operations": [],
+                "summary": "Test",
+            },
+            output_format="csv",
+            quality_contract_fingerprint=(
+                "quality123"
+            ),
+            quality_result={
+                "passed": False,
+                "total_checks": 3,
+                "failed_checks": 1,
+                "checks": [],
+            },
+        )
+
+    assert (
+        store.get_events()
+        == []
+    )
+
+
+

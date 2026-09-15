@@ -34,6 +34,10 @@ from models.data_quality import (
     DataQualityContract,
 )
 
+from utils.exceptions import (
+    DataQualityError,
+)
+
 runtime_settings = (
     get_runtime_settings()
 )
@@ -223,6 +227,10 @@ def _safe_tool_metadata(
             "target_dataset_name",
             "output_format",
         },
+        "configure_quality_contract_tool": {
+            "layer",
+            "dataset_name",
+        },
     }
 
     allowed = (
@@ -236,6 +244,86 @@ def _safe_tool_metadata(
         key: args[key]
         for key in allowed
         if key in args
+    }
+
+
+def _safe_quality_failure_metadata(
+    exc: DataQualityError,
+) -> dict:
+    """
+    Extract aggregate, non-row-level quality
+    information for execution observability.
+    """
+
+    details = (
+        exc.details
+        if isinstance(
+            exc.details,
+            dict,
+        )
+        else {}
+    )
+
+    quality_result = (
+        details.get(
+            "quality_result"
+        )
+    )
+
+    if not isinstance(
+        quality_result,
+        dict,
+    ):
+        quality_result = {}
+
+    metadata = {
+        "layer": (
+            details.get(
+                "layer"
+            )
+        ),
+        "dataset": (
+            details.get(
+                "dataset"
+            )
+        ),
+        "contract_name": (
+            details.get(
+                "contract_name"
+            )
+        ),
+        "contract_version": (
+            details.get(
+                "contract_version"
+            )
+        ),
+        "contract_fingerprint": (
+            details.get(
+                "contract_fingerprint"
+            )
+        ),
+        "passed": (
+            quality_result.get(
+                "passed"
+            )
+        ),
+        "total_checks": (
+            quality_result.get(
+                "total_checks"
+            )
+        ),
+        "failed_checks": (
+            quality_result.get(
+                "failed_checks"
+            )
+        ),
+    }
+
+    return {
+        key: value
+        for key, value
+        in metadata.items()
+        if value is not None
     }
 
 
@@ -992,6 +1080,28 @@ def tool_node(
             * 1000
         )
 
+        failure_metadata = {
+            **_safe_tool_metadata(
+                tool_name,
+                tool_call["args"],
+            ),
+            "error_type": (
+                type(exc).__name__
+            ),
+        }
+
+        if isinstance(
+            exc,
+            DataQualityError,
+        ):
+            failure_metadata[
+                "quality_gate"
+            ] = (
+                _safe_quality_failure_metadata(
+                    exc
+                )
+            )
+
         _record_event_safely(
             run_id=state.run_id,
             event_type="tool",
@@ -1000,15 +1110,9 @@ def tool_node(
             started_at=started_at,
             completed_at=completed_at,
             duration_ms=duration_ms,
-            metadata={
-                **_safe_tool_metadata(
-                    tool_name,
-                    tool_call["args"],
-                ),
-                "error_type": (
-                    type(exc).__name__
-                ),
-            },
+            metadata=(
+                failure_metadata
+            ),
         )
 
         reason = (
