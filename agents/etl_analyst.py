@@ -28,6 +28,12 @@ from utils.execution_observability import (
     ExecutionRunStore,
 )
 
+from typing import Literal
+
+from models.data_quality import (
+    DataQualityContract,
+)
+
 runtime_settings = (
     get_runtime_settings()
 )
@@ -104,6 +110,87 @@ Rules:
 
     return planner_llm.invoke(
         prompt
+    )
+
+
+def create_quality_contract(
+    *,
+    user_question: str,
+    dataset_name: str,
+) -> DataQualityContract:
+    """
+    Convert explicit user quality requirements into
+    a validated DataQualityContract.
+
+    The LLM decides WHAT quality rules the user asked
+    for. Deterministic code controls persistence and
+    enforcement.
+    """
+
+    planner_llm = (
+        pick_llm("medium")
+        .with_structured_output(
+            DataQualityContract
+        )
+    )
+
+    prompt = f"""
+You are a data-quality contract planner.
+
+Your job is NOT to inspect or modify datasets.
+
+Create a structured DataQualityContract containing
+ONLY quality requirements explicitly requested by
+the user.
+
+Target logical dataset:
+
+{dataset_name}
+
+User request:
+
+{user_question}
+
+Supported quality rules:
+
+- not_null
+- unique
+- accepted_values
+- range
+- row_count
+
+Rules:
+
+- Never invent quality constraints.
+- Never infer business rules that the user did not request.
+- Never invent column names.
+- Never generate Python code.
+- Never generate filesystem paths.
+- Never create rules merely because they seem like good practice.
+- Use only the supported quality-rule schemas.
+- Nullability must use an explicit not_null rule.
+- A range rule must contain at least one bound.
+- accepted_values must contain only values explicitly provided
+  or unambiguously required by the user.
+- If the user requests uniqueness across multiple columns,
+  preserve the complete composite key.
+- contract_version must be 1.
+"""
+
+    planned = (
+        planner_llm.invoke(
+            prompt
+        )
+    )
+
+    # Contract identity is application-controlled.
+    # The planner controls only the requested rules.
+    return DataQualityContract(
+        contract_version=1,
+        name=(
+            f"{dataset_name}_quality"
+        ),
+        rules=planned.rules,
     )
 
 
@@ -454,6 +541,87 @@ def silver_to_gold_tool(
         )
     )
 
+
+@tool
+def configure_quality_contract_tool(
+    layer: Literal[
+        "silver",
+        "gold",
+    ],
+    dataset_name: str,
+    user_question: str,
+) -> str:
+    """
+    Create a deterministic data-quality contract for
+    a Silver or Gold logical dataset.
+
+    Use this only when the user explicitly specifies
+    quality expectations.
+
+    Examples include:
+
+    - order_id must not be null
+    - order_id must be unique
+    - amount must be >= 0
+    - status must be one of paid, pending, cancelled
+    - the dataset must contain at least 1 row
+
+    This tool may create a new contract but may not
+    overwrite a different existing contract.
+
+    Args:
+        layer:
+            Target Medallion layer.
+            Must be "silver" or "gold".
+
+        dataset_name:
+            Logical target dataset name.
+            This is not a filesystem path.
+
+        user_question:
+            The user's explicit quality requirements.
+
+    Important:
+
+    - Never invent quality rules.
+    - Never create a quality contract unless the user
+      requested data-quality expectations.
+    - Never use this tool to bypass a failed quality gate.
+    - Never attempt to weaken or overwrite an existing
+      quality contract.
+    """
+
+    target_layer = (
+        DataLayer(
+            layer
+        )
+    )
+
+    contract = (
+        create_quality_contract(
+            user_question=(
+                user_question
+            ),
+            dataset_name=(
+                dataset_name
+            ),
+        )
+    )
+
+    etl_tools = ETLTools()
+
+    return (
+        etl_tools
+        .configure_quality_contract(
+            layer=target_layer,
+            dataset_name=(
+                dataset_name
+            ),
+            contract=contract,
+        )
+    )
+
+
 # ============================================================
 # TOOLKIT
 # ============================================================
@@ -462,6 +630,7 @@ tools = [
     extract_load_tool,
     bronze_to_silver_tool,
     silver_to_gold_tool,
+    configure_quality_contract_tool,
 ]
 
 tools_by_name = {
@@ -544,22 +713,26 @@ def llm_node(state: ETLAgentSchema):
         ↓
     Gold
 
-    You have three tools:
+    You have four tools:
 
     1. extract_load_tool
 
-    Extract API data into the Bronze layer.
+    Extract API data into Bronze.
 
     2. bronze_to_silver_tool
 
-    Clean, normalize, deduplicate, cast, filter, or otherwise
-    standardize an existing Bronze dataset into Silver.
+    Create cleaned/standardized Silver datasets
+    from Bronze.
 
     3. silver_to_gold_tool
 
-    Create analytics-ready or business-ready Gold datasets
-    from Silver. Use this for aggregations, KPIs, reporting
-    tables, and curated analytical outputs.
+    Create curated Gold datasets from Silver.
+
+    4. configure_quality_contract_tool
+
+    Create a persisted data-quality contract for a
+    Silver or Gold logical dataset when the user
+    explicitly specifies quality requirements.
 
 
     Rules:
@@ -576,6 +749,22 @@ def llm_node(state: ETLAgentSchema):
     - Never modify Silver while producing Gold.
     - Do not claim an operation succeeded unless its tool succeeded.
     - Use csv when no output format is specified.
+
+
+    Data-quality rules:
+
+    - Never invent a quality contract unless the user explicitly
+    requests quality requirements.
+    - Never invent quality constraints.
+    - Quality contracts apply to target Silver or Gold datasets.
+    - If a user requests quality constraints for a dataset that is
+    about to be created, configure the contract BEFORE creating
+    that dataset so the first candidate is gated.
+    - Never attempt to overwrite or weaken an existing contract.
+    - Never bypass a failed quality gate.
+    - There is no skip-quality-check mechanism.
+    - If a quality gate fails, the workflow must stop.
+    - Never claim a quality-rejected dataset was created successfully.
 
     Multi-stage requests:
 

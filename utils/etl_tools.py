@@ -52,6 +52,10 @@ from utils.data_quality_contracts import (
     quality_contract_fingerprint,
 )
 
+from models.data_quality import (
+    DataQualityContract,
+)
+
 class ETLTools:
     """
     Deterministic ETL operations used by the ETL agent.
@@ -143,6 +147,127 @@ class ETLTools:
             )
 
         return candidate
+
+
+    def configure_quality_contract(
+        self,
+        *,
+        layer: DataLayer,
+        dataset_name: str,
+        contract: DataQualityContract,
+    ) -> str:
+        """
+        Persist a new quality contract for a Silver or Gold
+        logical dataset.
+
+        Existing different contracts cannot be overwritten
+        through the agent-facing workflow.
+
+        Repeating the exact same contract is idempotent.
+        """
+
+        if layer not in {
+            DataLayer.SILVER,
+            DataLayer.GOLD,
+        }:
+            raise DatasetError(
+                "Agent-configured quality contracts "
+                "are supported only for Silver "
+                "and Gold datasets."
+            )
+
+        safe_dataset_name = (
+            validate_dataset_name(
+                dataset_name
+            )
+        )
+
+        if not contract.name.strip():
+            raise DatasetError(
+                "Data-quality contract name "
+                "must not be empty."
+            )
+
+        if not contract.rules:
+            raise DatasetError(
+                "An agent-configured data-quality "
+                "contract must contain at least "
+                "one explicit quality rule."
+            )
+
+        requested_fingerprint = (
+            quality_contract_fingerprint(
+                contract
+            )
+        )
+
+        existing_contract = (
+            self.quality_contract_store
+            .load(
+                layer=layer,
+                dataset_name=(
+                    safe_dataset_name
+                ),
+            )
+        )
+
+        if existing_contract is not None:
+
+            existing_fingerprint = (
+                quality_contract_fingerprint(
+                    existing_contract
+                )
+            )
+
+            if (
+                existing_fingerprint
+                == requested_fingerprint
+            ):
+                return (
+                    "Data-quality contract is already "
+                    "configured with the same content.\n"
+                    f"Dataset: {safe_dataset_name}\n"
+                    f"Layer: {layer.value}\n"
+                    f"Contract: {contract.name}\n"
+                    f"Contract version: "
+                    f"{contract.contract_version}\n"
+                    f"Rules: {len(contract.rules)}\n"
+                    f"Fingerprint: "
+                    f"{existing_fingerprint}"
+                )
+
+            raise DatasetError(
+                "A different data-quality contract "
+                f"already exists for {layer.value} "
+                f"dataset '{safe_dataset_name}'. "
+                "The ETL agent is not allowed to "
+                "overwrite or weaken an existing "
+                "quality contract."
+            )
+
+        fingerprint = (
+            self.quality_contract_store
+            .save(
+                layer=layer,
+                dataset_name=(
+                    safe_dataset_name
+                ),
+                contract=contract,
+            )
+        )
+
+        return (
+            "Data-quality contract configured "
+            "successfully.\n"
+            f"Dataset: {safe_dataset_name}\n"
+            f"Layer: {layer.value}\n"
+            f"Contract: {contract.name}\n"
+            f"Contract version: "
+            f"{contract.contract_version}\n"
+            f"Rules: {len(contract.rules)}\n"
+            f"Fingerprint: {fingerprint}"
+        )
+        
 
     def _evaluate_quality_gate(
         self,
@@ -249,12 +374,50 @@ class ETLTools:
             ),
         )
 
+        failed_checks = [
+            check
+            for check in result.checks
+            if not check.passed
+        ]
+
+        check_summaries = [
+            (
+                f"{check.rule_type}: "
+                f"{check.violation_count} "
+                "violation(s)"
+            )
+            for check in failed_checks[
+                :5
+            ]
+        ]
+
+        failure_summary = "; ".join(
+            check_summaries
+        )
+
+        remaining_failures = (
+            len(failed_checks)
+            - len(check_summaries)
+        )
+
+        if remaining_failures > 0:
+            failure_summary += (
+                f"; +{remaining_failures} "
+                "additional failed check(s)"
+            )
+
         raise DataQualityError(
             (
                 "Candidate "
                 f"{layer.value} dataset "
-                f"'{dataset_name}' failed its "
-                "data-quality contract."
+                f"'{dataset_name}' failed "
+                f"data-quality contract "
+                f"'{contract.name}'. "
+                f"{len(failed_checks)} of "
+                f"{result.total_checks} checks failed. "
+                f"{failure_summary}. "
+                f"Rejection report: "
+                f"{rejection_file}"
             ),
             details=details,
         )

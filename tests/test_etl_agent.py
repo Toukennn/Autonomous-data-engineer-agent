@@ -285,13 +285,14 @@ def test_etl_agent_orchestrates_medallion_in_order(
 
 
 
-def test_etl_agent_exposes_only_medallion_tools():
+def test_etl_agent_exposes_only_safe_tools():
     assert set(
         etl_module.tools_by_name
     ) == {
         "extract_load_tool",
         "bronze_to_silver_tool",
         "silver_to_gold_tool",
+        "configure_quality_contract_tool",
     }
 
     assert (
@@ -717,4 +718,131 @@ def test_etl_agent_records_structured_execution(
     assert (
         "https://example.com/orders"
         not in str(execution)
+    )
+
+
+
+def test_etl_agent_configures_quality_before_silver(
+    monkeypatch,
+):
+    calls = []
+
+    fake_llm = FakeLLM(
+        [
+            make_tool_call(
+                name=(
+                    "configure_quality_contract_tool"
+                ),
+                call_id="quality",
+                args={
+                    "layer": "silver",
+                    "dataset_name": (
+                        "clean_orders"
+                    ),
+                    "user_question": (
+                        "order_id must be non-null "
+                        "and amount must be >= 0."
+                    ),
+                },
+            ),
+            make_tool_call(
+                name=(
+                    "bronze_to_silver_tool"
+                ),
+                call_id="silver",
+                args={
+                    "source_dataset_name": (
+                        "orders"
+                    ),
+                    "target_dataset_name": (
+                        "clean_orders"
+                    ),
+                    "user_question": (
+                        "Clean the orders."
+                    ),
+                    "output_format": "csv",
+                },
+            ),
+            AIMessage(
+                content="Completed."
+            ),
+        ]
+    )
+
+    monkeypatch.setattr(
+        etl_module,
+        "etl_llm_with_tools",
+        fake_llm,
+    )
+
+    fake_tools = {
+        "configure_quality_contract_tool": (
+            FakeTool(
+                name=(
+                    "configure_quality_contract_tool"
+                ),
+                calls=calls,
+                result=(
+                    "Quality contract configured."
+                ),
+            )
+        ),
+        "bronze_to_silver_tool": (
+            FakeTool(
+                name=(
+                    "bronze_to_silver_tool"
+                ),
+                calls=calls,
+                result="Silver completed.",
+            )
+        ),
+    }
+
+    monkeypatch.setattr(
+        etl_module,
+        "tools_by_name",
+        fake_tools,
+    )
+
+    result = (
+        etl_module.etl_analyst.invoke(
+            {
+                "messages": [
+                    HumanMessage(
+                        content=(
+                            "Create clean_orders and "
+                            "require order_id to be "
+                            "non-null and amount >= 0."
+                        )
+                    )
+                ]
+            }
+        )
+    )
+
+    assert [
+        call["name"]
+        for call in calls
+    ] == [
+        "configure_quality_contract_tool",
+        "bronze_to_silver_tool",
+    ]
+
+    assert (
+        calls[0]["args"][
+            "dataset_name"
+        ]
+        == "clean_orders"
+    )
+
+    assert (
+        calls[1]["args"][
+            "target_dataset_name"
+        ]
+        == "clean_orders"
+    )
+
+    assert (
+        result["messages"][-1].content
+        == "Completed."
     )

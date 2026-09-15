@@ -2711,7 +2711,7 @@ def test_silver_quality_failure_does_not_overwrite_existing_dataset(
 
     with pytest.raises(
         DataQualityError,
-        match="failed its data-quality contract",
+        match="failed data-quality contract",
     ):
         isolated_etl_tools\
             .transform_bronze_to_silver(
@@ -2866,8 +2866,7 @@ def test_gold_quality_failure_does_not_overwrite_existing_dataset(
     with pytest.raises(
         DataQualityError,
         match=(
-            "failed its "
-            "data-quality contract"
+            "failed data-quality contract"
         ),
     ):
         isolated_etl_tools\
@@ -2920,3 +2919,78 @@ def test_gold_quality_failure_does_not_overwrite_existing_dataset(
         len(events_after)
         == len(events_before)
     )
+
+
+def test_agent_quality_contract_cannot_overwrite_existing_contract(
+    isolated_etl_tools,
+):
+    first = DataQualityContract(
+        name="orders_quality",
+        rules=[
+            NotNullRule(
+                type="not_null",
+                column="order_id",
+            )
+        ],
+    )
+
+    second = DataQualityContract(
+        name="orders_quality",
+        rules=[
+            RangeRule(
+                type="range",
+                column="amount",
+                min_value=0,
+            )
+        ],
+    )
+
+    isolated_etl_tools\
+        .configure_quality_contract(
+            layer=DataLayer.SILVER,
+            dataset_name="orders",
+            contract=first,
+        )
+
+    with pytest.raises(
+        DatasetError,
+        match="not allowed to overwrite",
+    ):
+        isolated_etl_tools\
+            .configure_quality_contract(
+                layer=DataLayer.SILVER,
+                dataset_name="orders",
+                contract=second,
+            )
+
+    loaded = (
+        isolated_etl_tools
+        .quality_contract_store
+        .load(
+            layer=DataLayer.SILVER,
+            dataset_name="orders",
+        )
+    )
+
+    assert loaded == first
+
+
+
+def test_agent_quality_contract_rejects_empty_rules(
+    isolated_etl_tools,
+):
+    contract = DataQualityContract(
+        name="orders_quality",
+        rules=[],
+    )
+
+    with pytest.raises(
+        DatasetError,
+        match="at least one explicit",
+    ):
+        isolated_etl_tools\
+            .configure_quality_contract(
+                layer=DataLayer.SILVER,
+                dataset_name="orders",
+                contract=contract,
+            )
