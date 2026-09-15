@@ -5,7 +5,15 @@ from datetime import datetime, timezone
 import pandas as pd
 from utils.api_client import APIClient
 
-from config.settings import get_runtime_settings
+from config.settings import (
+    get_database_settings,
+    get_runtime_settings,
+)
+
+from utils.warehouse import (
+    PostgresWarehouseLoader,
+)
+
 from models.schema import (
     CastColumnsOperation,
     DropColumnsOperation,
@@ -102,6 +110,16 @@ class ETLTools:
                 self.data_root
             )
         )
+
+        # Warehouse connectivity is intentionally lazy. (important to know!)
+        #
+        # Most ETL operations do not require PostgreSQL,
+        # and constructing ETLTools must not require
+        # database credentials merely to work with files.
+        self._warehouse_loader: (
+            PostgresWarehouseLoader
+            | None
+        ) = None        
 
     # ============================================================
     # PATH SAFETY
@@ -528,6 +546,149 @@ class ETLTools:
             file_path=rejection_file,
         )
 
+
+    def _get_warehouse_loader(
+        self,
+    ) -> PostgresWarehouseLoader:
+        """
+        Lazily initialize the deterministic
+        PostgreSQL warehouse writer.
+
+        Database credentials remain application
+        configuration and are never supplied by
+        the LLM.
+        """
+
+        if (
+            self._warehouse_loader
+            is None
+        ):
+            settings = (
+                get_database_settings()
+            )
+
+            self._warehouse_loader = (
+                PostgresWarehouseLoader(
+                    settings.psycopg_config()
+                )
+            )
+
+        return self._warehouse_loader   
+
+
+    def load_bronze_to_warehouse(
+        self,
+        *,
+        dataset_name: str,
+    ) -> str:
+        """
+        Load one logical Bronze dataset into the
+        PostgreSQL Bronze warehouse schema.
+
+        Physical source-file resolution and target
+        relation placement are application-controlled.
+
+        The caller provides only a logical dataset
+        identifier.
+
+        Example:
+
+            orders
+
+        becomes:
+
+            data/bronze/orders/extracted_data.*
+                    ↓
+            PostgreSQL bronze.orders
+        """
+
+        safe_dataset_name = (
+            validate_dataset_name(
+                dataset_name
+            )
+        )
+
+        # ============================================================
+        # RESOLVE DURABLE BRONZE DATASET
+        # ============================================================
+
+        source_file = (
+            self._resolve_layer_dataset_file(
+                layer=DataLayer.BRONZE,
+                dataset_name=(
+                    safe_dataset_name
+                ),
+                file_stem="extracted_data",
+            )
+        )
+
+        # ============================================================
+        # LOAD BRONZE DATAFRAME
+        # ============================================================
+
+        dataframe = (
+            self._load_dataframe(
+                str(
+                    source_file
+                )
+            )
+        )
+
+        # ============================================================
+        # SOURCE SCHEMA IDENTITY
+        # ============================================================
+
+        source_schema = (
+            dataframe_schema(
+                dataframe
+            )
+        )
+
+        source_schema_fingerprint = (
+            schema_fingerprint(
+                source_schema
+            )
+        )
+
+        # ============================================================
+        # WAREHOUSE LOAD
+        # ============================================================
+
+        warehouse_loader = (
+            self._get_warehouse_loader()
+        )
+
+        result = (
+            warehouse_loader
+            .replace_bronze_table(
+                dataset_name=(
+                    safe_dataset_name
+                ),
+                dataframe=dataframe,
+            )
+        )
+
+        # ============================================================
+        # RESULT
+        # ============================================================
+
+        return (
+            "Bronze dataset loaded into "
+            "PostgreSQL successfully.\n"
+            f"Dataset: {safe_dataset_name}\n"
+            f"Source layer: "
+            f"{DataLayer.BRONZE.value}\n"
+            f"Source file: {source_file}\n"
+            f"Source schema fingerprint: "
+            f"{source_schema_fingerprint}\n"
+            f"Warehouse relation: "
+            f"{result.schema}."
+            f"{result.table}\n"
+            f"Rows loaded: "
+            f"{result.row_count}\n"
+            f"Columns loaded: "
+            f"{result.column_count}"
+        )
 
 
     def _resolve_layer_dataset_file(

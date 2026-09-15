@@ -40,6 +40,9 @@ from utils.exceptions import (
     DataQualityError,
 )
 
+from utils.warehouse import (
+    WarehouseLoadResult,
+)
 
 def _bronze_dataset_file(
     isolated_etl_tools,
@@ -3032,3 +3035,225 @@ def test_agent_quality_contract_rejects_empty_rules(
                 dataset_name="orders",
                 contract=contract,
             )
+
+
+
+class FakeWarehouseLoader:
+    def __init__(
+        self,
+    ):
+        self.calls = []
+
+    def replace_bronze_table(
+        self,
+        *,
+        dataset_name,
+        dataframe,
+    ):
+        self.calls.append(
+            {
+                "dataset_name": (
+                    dataset_name
+                ),
+                "dataframe": (
+                    dataframe.copy()
+                ),
+            }
+        )
+
+        return WarehouseLoadResult(
+            schema="bronze",
+            table=dataset_name,
+            row_count=len(
+                dataframe
+            ),
+            column_count=len(
+                dataframe.columns
+            ),
+            columns=tuple(
+                dataframe.columns
+            ),
+        )
+
+
+
+def test_bronze_dataset_loads_to_warehouse(
+    isolated_etl_tools,
+):
+    bronze_directory = (
+        isolated_etl_tools.data_root
+        / "bronze"
+        / "orders"
+    )
+
+    bronze_directory.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    source = pd.DataFrame(
+        {
+            "order_id": [
+                1,
+                2,
+            ],
+            "amount": [
+                10.0,
+                20.0,
+            ],
+        }
+    )
+
+    source.to_csv(
+        bronze_directory
+        / "extracted_data.csv",
+        index=False,
+    )
+
+    warehouse = (
+        FakeWarehouseLoader()
+    )
+
+    isolated_etl_tools\
+        ._warehouse_loader = (
+            warehouse
+        )
+
+    result = (
+        isolated_etl_tools
+        .load_bronze_to_warehouse(
+            dataset_name="orders",
+        )
+    )
+
+    assert (
+        len(
+            warehouse.calls
+        )
+        == 1
+    )
+
+    call = (
+        warehouse.calls[0]
+    )
+
+    assert (
+        call["dataset_name"]
+        == "orders"
+    )
+
+    pd.testing.assert_frame_equal(
+        call["dataframe"],
+        source,
+    )
+
+    assert (
+        "bronze.orders"
+        in result
+    )
+
+    assert (
+        "Rows loaded: 2"
+        in result
+    )
+
+
+
+def test_warehouse_bridge_requires_bronze_dataset(
+    isolated_etl_tools,
+):
+    warehouse = (
+        FakeWarehouseLoader()
+    )
+
+    isolated_etl_tools\
+        ._warehouse_loader = (
+            warehouse
+        )
+
+    with pytest.raises(
+        DatasetError,
+        match=(
+            "Bronze dataset "
+            "does not exist"
+        ),
+    ):
+        isolated_etl_tools\
+            .load_bronze_to_warehouse(
+                dataset_name="orders",
+            )
+
+    assert (
+        warehouse.calls
+        == []
+    )
+
+
+
+def test_warehouse_bridge_rejects_ambiguous_bronze_formats(
+    isolated_etl_tools,
+):
+    bronze_directory = (
+        isolated_etl_tools.data_root
+        / "bronze"
+        / "orders"
+    )
+
+    bronze_directory.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    dataframe = pd.DataFrame(
+        {
+            "id": [1],
+        }
+    )
+
+    dataframe.to_csv(
+        bronze_directory
+        / "extracted_data.csv",
+        index=False,
+    )
+
+    dataframe.to_json(
+        bronze_directory
+        / "extracted_data.json",
+        orient="records",
+        lines=True,
+    )
+
+    warehouse = (
+        FakeWarehouseLoader()
+    )
+
+    isolated_etl_tools\
+        ._warehouse_loader = (
+            warehouse
+        )
+
+    with pytest.raises(
+        DatasetError,
+        match=(
+            "format is ambiguous"
+        ),
+    ):
+        isolated_etl_tools\
+            .load_bronze_to_warehouse(
+                dataset_name="orders",
+            )
+
+    assert (
+        warehouse.calls
+        == []
+    )
+
+
+def test_etl_tools_does_not_initialize_warehouse_eagerly(
+    isolated_etl_tools,
+):
+    assert (
+        isolated_etl_tools
+        ._warehouse_loader
+        is None
+    )
