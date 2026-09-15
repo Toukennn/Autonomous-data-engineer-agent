@@ -61,3 +61,6 @@ dbt/models/sources/bronze_sources.yml
 
 # Runtime-generated dbt staging models
 dbt/models/staging/generated/
+
+# Runtime-generated dbt Gold models
+dbt/models/marts/generated/

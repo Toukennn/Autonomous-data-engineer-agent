@@ -48,6 +48,11 @@ from utils.dbt_sources import (
     DBTSourceRegistry,
 )
 
+from utils.dbt_models import (
+    DBTGoldModelManager,
+    DBTSilverModelManager,
+)
+
 def _bronze_dataset_file(
     isolated_etl_tools,
     dataset_name: str = "orders",
@@ -3562,3 +3567,53 @@ def test_warehouse_sync_metadata_failure_prevents_lineage(
         .get_events()
         == []
     )
+
+
+def test_dbt_gold_model_requires_existing_silver(
+    isolated_etl_tools,
+    tmp_path,
+    monkeypatch,
+):
+    dbt_root = (
+        tmp_path
+        / "dbt"
+    )
+
+    isolated_etl_tools\
+        .dbt_silver_model_manager = (
+            DBTSilverModelManager(
+                dbt_project_dir=dbt_root
+            )
+        )
+
+    isolated_etl_tools\
+        .dbt_gold_model_manager = (
+            DBTGoldModelManager(
+                dbt_project_dir=dbt_root
+            )
+        )
+
+    monkeypatch.setattr(
+        isolated_etl_tools
+        .dbt_source_registry,
+        "get_registered_source",
+        lambda dataset_name: {
+            "dataset": dataset_name,
+            "columns": [
+                "order_id",
+                "amount",
+            ],
+        },
+    )
+
+    with pytest.raises(
+        DatasetError,
+        match=(
+            "Silver dbt model "
+            "does not exist"
+        ),
+    ):
+        isolated_etl_tools\
+            .create_dbt_gold_model(
+                source_dataset="orders",
+            )

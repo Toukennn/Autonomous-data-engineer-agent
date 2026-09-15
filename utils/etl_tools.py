@@ -69,6 +69,7 @@ from utils.dbt_sources import (
 )
 
 from utils.dbt_models import (
+    DBTGoldModelManager,
     DBTSilverModelManager,
 )
 
@@ -149,6 +150,15 @@ class ETLTools:
                 )
             )
         )     
+
+        self.dbt_gold_model_manager = (
+            DBTGoldModelManager(
+                dbt_project_dir=(
+                    self.project_root
+                    / "dbt"
+                )
+            )
+        )
 
     # ============================================================
     # PATH SAFETY
@@ -3823,6 +3833,93 @@ class ETLTools:
             f"Bronze source: "
             f"bronze.{safe_dataset_name}\n"
             f"dbt model: "
+            f"{result.model_name}\n"
+            f"Model file: "
+            f"{result.model_file}"
+        )
+
+
+    def create_dbt_gold_model(
+        self,
+        *,
+        source_dataset: str,
+    ) -> str:
+        """
+        Create a deterministic bootstrap Gold dbt mart
+        from an existing generated Silver dbt model.
+
+        No arbitrary SQL is accepted.
+        """
+
+        safe_dataset_name = (
+            validate_dataset_name(
+                source_dataset
+            )
+        )
+
+        # Bronze synchronization metadata remains the
+        # authoritative column list while Silver is still
+        # an identity projection.
+        source_metadata = (
+            self.dbt_source_registry
+            .get_registered_source(
+                safe_dataset_name
+            )
+        )
+
+        columns = (
+            source_metadata.get(
+                "columns"
+            )
+        )
+
+        if not isinstance(
+            columns,
+            list,
+        ):
+            raise DatasetError(
+                "Registered dbt source is missing "
+                "its column metadata."
+            )
+
+        silver_model_name = (
+            self.dbt_silver_model_manager
+            .model_name_for_dataset(
+                safe_dataset_name
+            )
+        )
+
+        silver_model_file = (
+            self.dbt_silver_model_manager
+            .model_file_for_dataset(
+                safe_dataset_name
+            )
+        )
+
+        if not silver_model_file.exists():
+            raise DatasetError(
+                "Silver dbt model does not exist "
+                f"for dataset: {safe_dataset_name}"
+            )
+
+        result = (
+            self.dbt_gold_model_manager
+            .create_silver_projection(
+                source_dataset=(
+                    safe_dataset_name
+                ),
+                source_model_name=(
+                    silver_model_name
+                ),
+                columns=columns,
+            )
+        )
+
+        return (
+            "Gold dbt model created successfully.\n"
+            f"Silver model: "
+            f"{silver_model_name}\n"
+            f"Gold model: "
             f"{result.model_name}\n"
             f"Model file: "
             f"{result.model_file}"
