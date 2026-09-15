@@ -86,6 +86,14 @@ class DataQualityError(
         self.details = details
 
 
+class WarehouseLoadError(
+    DatabaseError
+):
+    """
+    A deterministic warehouse load failed.
+    """
+
+
 class ExternalAPIError(ETLError):
     """
     External API extraction failed.
