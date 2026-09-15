@@ -45,6 +45,7 @@ class PostgresWarehouseLoader:
     """
 
     BRONZE_SCHEMA = "bronze"
+    POSTGRES_IDENTIFIER_MAX_BYTES = 63
 
     def __init__(
         self,
@@ -73,9 +74,10 @@ class PostgresWarehouseLoader:
     # ============================================================
     # DATAFRAME VALIDATION
     # ============================================================
-
-    @staticmethod
+    
+    @classmethod
     def _validate_dataframe(
+        cls,
         dataframe: pd.DataFrame,
     ) -> None:
         """
@@ -133,6 +135,11 @@ class PostgresWarehouseLoader:
                     "Warehouse column names "
                     "cannot contain null bytes."
                 )
+
+            cls._validate_postgres_identifier(
+                column,
+                kind="Warehouse column name",
+            )
 
     # ============================================================
     # POSTGRES TYPE MAPPING
@@ -320,6 +327,11 @@ class PostgresWarehouseLoader:
             )
         )
 
+        self._validate_postgres_identifier(
+            safe_dataset_name,
+            kind="Warehouse table name",
+        )
+
         self._validate_dataframe(
             dataframe
         )
@@ -483,3 +495,28 @@ class PostgresWarehouseLoader:
                 columns
             ),
         )
+
+
+    @classmethod
+    def _validate_postgres_identifier(
+        cls,
+        identifier: str,
+        *,
+        kind: str,
+    ) -> None:
+        """
+        Reject identifiers PostgreSQL would truncate.
+        """
+
+        if (
+            len(
+                identifier.encode(
+                    "utf-8"
+                )
+            )
+            > cls.POSTGRES_IDENTIFIER_MAX_BYTES
+        ):
+            raise DatasetError(
+                f"{kind} exceeds PostgreSQL's "
+                "63-byte identifier limit."
+            )

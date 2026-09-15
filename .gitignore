@@ -58,3 +58,6 @@ dbt/dbt_packages/
 # dbt local/generated state
 dbt/.user.yml
 dbt/models/sources/bronze_sources.yml
+
+# Runtime-generated dbt staging models
+dbt/models/staging/generated/

@@ -316,3 +316,59 @@ def test_duplicate_columns_are_rejected(
             )
 
     connect_mock.assert_not_called()
+
+
+def test_overlong_table_name_is_rejected(
+    monkeypatch,
+):
+    connect_mock = MagicMock()
+
+    monkeypatch.setattr(
+        "utils.warehouse.psycopg2.connect",
+        connect_mock,
+    )
+
+    dataframe = pd.DataFrame(
+        {
+            "id": [1],
+        }
+    )
+
+    with pytest.raises(
+        DatasetError,
+        match="63-byte identifier limit",
+    ):
+        _loader().replace_bronze_table(
+            dataset_name="a" * 64,
+            dataframe=dataframe,
+        )
+
+    connect_mock.assert_not_called()
+
+
+def test_overlong_column_name_is_rejected(
+    monkeypatch,
+):
+    connect_mock = MagicMock()
+
+    monkeypatch.setattr(
+        "utils.warehouse.psycopg2.connect",
+        connect_mock,
+    )
+
+    dataframe = pd.DataFrame(
+        {
+            "a" * 64: [1],
+        }
+    )
+
+    with pytest.raises(
+        DatasetError,
+        match="63-byte identifier limit",
+    ):
+        _loader().replace_bronze_table(
+            dataset_name="orders",
+            dataframe=dataframe,
+        )
+
+    connect_mock.assert_not_called()

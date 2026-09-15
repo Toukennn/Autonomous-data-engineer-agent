@@ -417,3 +417,36 @@ class DBTSourceRegistry:
             ) from exc
 
         return self.source_file
+
+
+    def get_registered_source(
+        self,
+        dataset_name: str,
+    ) -> dict:
+        """
+        Return validated warehouse-sync metadata for one
+        registered Bronze dbt source.
+        """
+
+        safe_dataset_name = (
+            validate_dataset_name(
+                dataset_name
+            )
+        )
+
+        for metadata in (
+            self._discover_sources()
+        ):
+            if (
+                metadata["dataset"]
+                == safe_dataset_name
+            ):
+                return dict(
+                    metadata
+                )
+
+        raise DatasetError(
+            "Bronze dataset is not registered "
+            f"as a dbt source: "
+            f"{safe_dataset_name}"
+        )

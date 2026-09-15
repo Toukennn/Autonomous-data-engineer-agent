@@ -68,6 +68,10 @@ from utils.dbt_sources import (
     DBTSourceRegistry,
 )
 
+from utils.dbt_models import (
+    DBTSilverModelManager,
+)
+
 class ETLTools:
     """
     Deterministic ETL operations used by the ETL agent.
@@ -135,7 +139,16 @@ class ETLTools:
         self._warehouse_loader: (
             PostgresWarehouseLoader
             | None
-        ) = None        
+        ) = None   
+
+        self.dbt_silver_model_manager = (
+            DBTSilverModelManager(
+                dbt_project_dir=(
+                    self.project_root
+                    / "dbt"
+                )
+            )
+        )     
 
     # ============================================================
     # PATH SAFETY
@@ -3752,4 +3765,65 @@ class ETLTools:
 
         return self.get_dataset_context(
             str(dataset_file)
+        )
+
+
+    def create_dbt_silver_model(
+        self,
+        *,
+        source_dataset: str,
+    ) -> str:
+        """
+        Create a deterministic bootstrap Silver dbt model
+        from one successfully synchronized Bronze source.
+
+        No arbitrary SQL is accepted.
+        """
+
+        safe_dataset_name = (
+            validate_dataset_name(
+                source_dataset
+            )
+        )
+
+        source_metadata = (
+            self.dbt_source_registry
+            .get_registered_source(
+                safe_dataset_name
+            )
+        )
+
+        columns = (
+            source_metadata.get(
+                "columns"
+            )
+        )
+
+        if not isinstance(
+            columns,
+            list,
+        ):
+            raise DatasetError(
+                "Registered dbt source is missing "
+                "its column metadata."
+            )
+
+        result = (
+            self.dbt_silver_model_manager
+            .create_source_projection(
+                source_dataset=(
+                    safe_dataset_name
+                ),
+                columns=columns,
+            )
+        )
+
+        return (
+            "Silver dbt model created successfully.\n"
+            f"Bronze source: "
+            f"bronze.{safe_dataset_name}\n"
+            f"dbt model: "
+            f"{result.model_name}\n"
+            f"Model file: "
+            f"{result.model_file}"
         )

@@ -16,3 +16,11 @@ clean-targets:
 models:
   autonomous_data_engineer:
     +materialized: view
+
+    staging:
+      +schema: silver
+      +materialized: view
+
+    marts:
+      +schema: gold
+      +materialized: table
