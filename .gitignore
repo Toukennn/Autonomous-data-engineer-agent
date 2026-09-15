@@ -48,3 +48,9 @@ Desktop.ini
 
 # Runtime datasets and pipeline state
 data/
+
+
+# dbt generated artifacts
+dbt/target/
+dbt/logs/
+dbt/dbt_packages/

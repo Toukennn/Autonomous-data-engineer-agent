@@ -1,0 +1,20 @@
+autonomous_data_engineer:
+  target: dev
+
+  outputs:
+    dev:
+      type: postgres
+
+      host: "{{ env_var('DB_HOST') }}"
+      user: "{{ env_var('DB_USER') }}"
+      password: "{{ env_var('DB_PASSWORD') }}"
+
+      port: "{{ env_var('DB_PORT', '5432') | int }}"
+      dbname: "{{ env_var('DB_NAME') }}"
+
+      schema: "{{ env_var('DBT_TARGET_SCHEMA', 'dbt_dev') }}"
+
+      threads: "{{ env_var('DBT_THREADS', '4') | int }}"
+
+      connect_timeout: 10
+      retries: 1

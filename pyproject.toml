@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
+    "dbt-postgres>=1.11.0",
     "langchain>=1.4.0",
     "langchain-anthropic>=1.7.2",
     "langchain-openai>=1.6.0",
