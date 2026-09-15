@@ -44,6 +44,10 @@ from utils.warehouse import (
     WarehouseLoadResult,
 )
 
+from utils.dbt_sources import (
+    DBTSourceRegistry,
+)
+
 def _bronze_dataset_file(
     isolated_etl_tools,
     dataset_name: str = "orders",
@@ -3079,6 +3083,7 @@ class FakeWarehouseLoader:
 
 def test_bronze_dataset_loads_to_warehouse(
     isolated_etl_tools,
+    tmp_path,
 ):
     bronze_directory = (
         isolated_etl_tools.data_root
@@ -3119,12 +3124,32 @@ def test_bronze_dataset_loads_to_warehouse(
             warehouse
         )
 
+    dbt_project_dir = (
+        tmp_path
+        / "dbt"
+    )
+
+    isolated_etl_tools.dbt_source_registry = (
+        DBTSourceRegistry(
+            data_root=(
+                isolated_etl_tools.data_root
+            ),
+            dbt_project_dir=(
+                dbt_project_dir
+            ),
+        )
+    )
+
     result = (
         isolated_etl_tools
         .load_bronze_to_warehouse(
             dataset_name="orders",
         )
     )
+
+    # ============================================================
+    # WAREHOUSE CALL
+    # ============================================================
 
     assert (
         len(
@@ -3157,6 +3182,10 @@ def test_bronze_dataset_loads_to_warehouse(
         in result
     )
 
+    # ============================================================
+    # WAREHOUSE SYNC METADATA
+    # ============================================================
+
     metadata_file = (
         isolated_etl_tools.data_root
         / "bronze"
@@ -3164,14 +3193,18 @@ def test_bronze_dataset_loads_to_warehouse(
         / "warehouse_sync_metadata.json"
     )
 
-    assert metadata_file.exists()
+    assert (
+        metadata_file.exists()
+    )
 
     with metadata_file.open(
         "r",
         encoding="utf-8",
     ) as file:
-        metadata = json.load(
-            file
+        metadata = (
+            json.load(
+                file
+            )
         )
 
     assert (
@@ -3214,9 +3247,69 @@ def test_bronze_dataset_loads_to_warehouse(
     )
 
     assert (
-        metadata["rows_loaded"]
+        metadata[
+            "rows_loaded"
+        ]
         == 2
     )
+
+    assert (
+        metadata[
+            "columns_loaded"
+        ]
+        == 2
+    )
+
+    assert (
+        metadata[
+            "columns"
+        ]
+        == [
+            "order_id",
+            "amount",
+        ]
+    )
+
+    # ============================================================
+    # DBT SOURCE REGISTRY
+    # ============================================================
+
+    dbt_source_file = (
+        dbt_project_dir
+        / "models"
+        / "sources"
+        / "bronze_sources.yml"
+    )
+
+    assert (
+        dbt_source_file.exists()
+    )
+
+    source_definition = (
+        dbt_source_file
+        .read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert (
+        'name: "bronze"'
+        in source_definition
+    )
+
+    assert (
+        'schema: "bronze"'
+        in source_definition
+    )
+
+    assert (
+        'name: "orders"'
+        in source_definition
+    )
+
+    # ============================================================
+    # LINEAGE
+    # ============================================================
 
     events = (
         isolated_etl_tools
@@ -3224,26 +3317,68 @@ def test_bronze_dataset_loads_to_warehouse(
         .get_events()
     )
 
-    assert len(events) == 1
+    assert (
+        len(
+            events
+        )
+        == 1
+    )
+
+    event = (
+        events[0]
+    )
 
     assert (
-        events[0][
-            "operation"
-        ]
+        event["operation"]
         == "warehouse_sync"
     )
 
     assert (
-        events[0][
-            "target"
-        ][
-            "table"
+        event["source"][
+            "layer"
+        ]
+        == "bronze"
+    )
+
+    assert (
+        event["source"][
+            "dataset"
         ]
         == "orders"
     )
 
     assert (
+        event["target"][
+            "type"
+        ]
+        == "warehouse_table"
+    )
+
+    assert (
+        event["target"][
+            "schema"
+        ]
+        == "bronze"
+    )
+
+    assert (
+        event["target"][
+            "table"
+        ]
+        == "orders"
+    )
+
+    # ============================================================
+    # USER-FACING RESULT
+    # ============================================================
+
+    assert (
         "Lineage event:"
+        in result
+    )
+
+    assert (
+        "dbt source registry:"
         in result
     )
 

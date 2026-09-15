@@ -64,6 +64,10 @@ from models.data_quality import (
     DataQualityContract,
 )
 
+from utils.dbt_sources import (
+    DBTSourceRegistry,
+)
+
 class ETLTools:
     """
     Deterministic ETL operations used by the ETL agent.
@@ -108,6 +112,18 @@ class ETLTools:
         self.quality_contract_store = (
             DataQualityContractStore(
                 self.data_root
+            )
+        )
+
+        self.dbt_source_registry = (
+            DBTSourceRegistry(
+                data_root=(
+                    self.data_root
+                ),
+                dbt_project_dir=(
+                    self.project_root
+                    / "dbt"
+                ),
             )
         )
 
@@ -761,6 +777,15 @@ class ETLTools:
         )
 
         # ============================================================
+        # DBT SOURCE REGISTRY
+        # ============================================================
+
+        dbt_source_file = (
+            self.dbt_source_registry
+            .refresh_bronze_sources()
+        )
+
+        # ============================================================
         # LINEAGE
         # ============================================================
 
@@ -811,6 +836,8 @@ class ETLTools:
             f"{result.column_count}\n"
             f"Sync metadata: "
             f"{metadata_file}\n"
+            f"dbt source registry: "
+            f"{dbt_source_file}\n"
             f"Lineage event: "
             f"{lineage_event_id}"
         )
