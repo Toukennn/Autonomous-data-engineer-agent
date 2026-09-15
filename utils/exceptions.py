@@ -62,6 +62,30 @@ class SchemaEvolutionError(DatasetError):
         self.details = details
 
 
+class DataQualityError(
+    DatasetError
+):
+    """
+    A candidate dataset was rejected because
+    it violated its configured quality contract.
+
+    details contains the deterministic quality
+    evaluation that caused the rejection.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        details: dict[str, object],
+    ):
+        super().__init__(
+            message
+        )
+
+        self.details = details
+
+
 class ExternalAPIError(ETLError):
     """
     External API extraction failed.

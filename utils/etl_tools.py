@@ -20,6 +20,7 @@ from models.schema import (
     TransformPlan,
 )
 from utils.exceptions import (
+    DataQualityError,
     DatasetError,
     SchemaEvolutionError,
     UnsupportedFormatError,
@@ -41,6 +42,15 @@ from utils.data_layers import (
 )
 
 from utils.lineage import LineageStore
+
+from utils.data_quality import (
+    evaluate_data_quality,
+)
+
+from utils.data_quality_contracts import (
+    DataQualityContractStore,
+    quality_contract_fingerprint,
+)
 
 class ETLTools:
     """
@@ -79,6 +89,12 @@ class ETLTools:
 
         self.lineage_store = (
             LineageStore(
+                self.data_root
+            )
+        )
+
+        self.quality_contract_store = (
+            DataQualityContractStore(
                 self.data_root
             )
         )
@@ -127,6 +143,228 @@ class ETLTools:
             )
 
         return candidate
+
+    def _evaluate_quality_gate(
+        self,
+        *,
+        dataframe: pd.DataFrame,
+        layer: DataLayer,
+        dataset_name: str,
+        rejection_file: Path,
+    ) -> tuple[
+        dict | None,
+        str | None,
+    ]:
+        """
+        Evaluate a candidate dataset against its
+        persisted quality contract.
+
+        No contract:
+            allow the candidate.
+
+        Passing contract:
+            return quality metadata.
+
+        Failing contract:
+            persist rejection information and raise
+            DataQualityError before dataset mutation.
+        """
+
+        contract = (
+            self.quality_contract_store
+            .load(
+                layer=layer,
+                dataset_name=dataset_name,
+            )
+        )
+
+        if contract is None:
+            return (
+                None,
+                None,
+            )
+
+        fingerprint = (
+            quality_contract_fingerprint(
+                contract
+            )
+        )
+
+        result = (
+            evaluate_data_quality(
+                dataframe=dataframe,
+                contract=contract,
+            )
+        )
+
+        result_payload = (
+            result.model_dump(
+                mode="json"
+            )
+        )
+
+        if result.passed:
+            return (
+                result_payload,
+                fingerprint,
+            )
+
+        details: dict[
+            str,
+            object,
+        ] = {
+            "layer": layer.value,
+            "dataset": dataset_name,
+            "contract_name": (
+                contract.name
+            ),
+            "contract_version": (
+                contract.contract_version
+            ),
+            "contract_fingerprint": (
+                fingerprint
+            ),
+            "quality_result": (
+                result_payload
+            ),
+        }
+
+        self._persist_quality_rejection(
+            layer=layer,
+            dataset_name=dataset_name,
+            contract_name=(
+                contract.name
+            ),
+            contract_version=(
+                contract.contract_version
+            ),
+            contract_fingerprint=(
+                fingerprint
+            ),
+            quality_result=(
+                result_payload
+            ),
+            rejection_file=(
+                rejection_file
+            ),
+        )
+
+        raise DataQualityError(
+            (
+                "Candidate "
+                f"{layer.value} dataset "
+                f"'{dataset_name}' failed its "
+                "data-quality contract."
+            ),
+            details=details,
+        )
+
+
+    def _persist_quality_rejection(
+        self,
+        *,
+        layer: DataLayer,
+        dataset_name: str,
+        contract_name: str,
+        contract_version: int,
+        contract_fingerprint: str,
+        quality_result: dict,
+        rejection_file: Path,
+    ) -> None:
+        """
+        Persist a failed quality-gate evaluation.
+
+        The report contains aggregate quality
+        results only. Raw dataset rows are not
+        persisted.
+        """
+
+        if rejection_file.exists():
+
+            try:
+                with rejection_file.open(
+                    "r",
+                    encoding="utf-8",
+                ) as file:
+                    report = json.load(
+                        file
+                    )
+
+            except (
+                OSError,
+                json.JSONDecodeError,
+            ) as exc:
+                raise DatasetError(
+                    "Failed to load data-quality "
+                    "rejection report."
+                ) from exc
+
+            if not isinstance(
+                report,
+                dict,
+            ):
+                raise DatasetError(
+                    "Data-quality rejection report "
+                    "must be a JSON object."
+                )
+
+            events = report.get(
+                "events"
+            )
+
+            if not isinstance(
+                events,
+                list,
+            ):
+                raise DatasetError(
+                    "Data-quality rejection report "
+                    "contains an invalid events list."
+                )
+
+        else:
+
+            report = {
+                "report_version": 1,
+                "layer": layer.value,
+                "dataset": dataset_name,
+                "events": [],
+            }
+
+            events = report[
+                "events"
+            ]
+
+        event = {
+            "rejected_at": (
+                datetime.now(
+                    timezone.utc
+                ).isoformat()
+            ),
+            "contract_name": (
+                contract_name
+            ),
+            "contract_version": (
+                contract_version
+            ),
+            "contract_fingerprint": (
+                contract_fingerprint
+            ),
+            "quality_result": (
+                quality_result
+            ),
+        }
+
+        events.append(
+            event
+        )
+
+        report["events"] = events
+
+        self._save_json_atomic(
+            payload=report,
+            file_path=rejection_file,
+        )
+
 
 
     def _resolve_layer_dataset_file(
@@ -2339,6 +2577,10 @@ class ETLTools:
 
         The transformation plan may intentionally change the schema,
         because Silver represents cleaned and standardized data.
+
+        If a Silver quality contract exists for the target dataset,
+        the transformed candidate must pass it before durable
+        persistence occurs.
         """
 
         source_name = (
@@ -2411,6 +2653,10 @@ class ETLTools:
             )
         )
 
+        # ============================================================
+        # CANDIDATE OUTPUT SCHEMA
+        # ============================================================
+
         output_schema = (
             dataframe_schema(
                 transformed
@@ -2446,6 +2692,40 @@ class ETLTools:
         metadata_file = (
             output_directory
             / "transformation_metadata.json"
+        )
+
+        quality_rejection_file = (
+            output_directory
+            / "quality_rejections.json"
+        )
+
+        # ============================================================
+        # SILVER QUALITY GATE
+        # ============================================================
+        #
+        # IMPORTANT:
+        #
+        # This MUST happen before the durable Silver save.
+        #
+        # If the candidate fails its contract:
+        #
+        # - DataQualityError is raised
+        # - rejection metadata is persisted
+        # - the existing Silver dataset is NOT replaced
+        # - metadata is NOT replaced
+        # - successful lineage is NOT written
+        # ============================================================
+
+        (
+            quality_result,
+            quality_contract_fingerprint_value,
+        ) = self._evaluate_quality_gate(
+            dataframe=transformed,
+            layer=DataLayer.SILVER,
+            dataset_name=target_name,
+            rejection_file=(
+                quality_rejection_file
+            ),
         )
 
         # ============================================================
@@ -2514,6 +2794,24 @@ class ETLTools:
             "output_schema_fingerprint": (
                 output_schema_fingerprint
             ),
+
+            # ========================================================
+            # QUALITY METADATA
+            # ========================================================
+
+            "quality_gate": {
+                "contract_configured": (
+                    quality_result
+                    is not None
+                ),
+                "contract_fingerprint": (
+                    quality_contract_fingerprint_value
+                ),
+                "result": (
+                    quality_result
+                ),
+            },
+
             "transformation_plan": (
                 plan.model_dump(
                     mode="json"
@@ -2525,6 +2823,10 @@ class ETLTools:
             payload=metadata,
             file_path=metadata_file,
         )
+
+        # ============================================================
+        # LINEAGE
+        # ============================================================
 
         plan_payload = (
             plan.model_dump(
@@ -2567,6 +2869,12 @@ class ETLTools:
         # RESULT
         # ============================================================
 
+        quality_status = (
+            "passed"
+            if quality_result is not None
+            else "not configured"
+        )
+
         return (
             "Bronze-to-Silver transformation "
             "completed successfully.\n"
@@ -2583,13 +2891,13 @@ class ETLTools:
             f"{list(transformed.columns)}\n"
             f"Output schema fingerprint: "
             f"{output_schema_fingerprint}\n"
+            f"Quality contract: "
+            f"{quality_status}\n"
             f"Output file: {output_file}\n"
             f"Metadata: {metadata_file}\n"
             f"Plan summary: {plan.summary}"
             f"\nLineage event: {lineage_event_id}"
         )
-
-
 
     def transform_silver_to_gold(
         self,
@@ -2606,6 +2914,10 @@ class ETLTools:
 
         The validated TransformPlan may intentionally filter,
         aggregate, select, rename, or otherwise reshape the data.
+
+        If a Gold quality contract exists for the target dataset,
+        the curated candidate must pass it before durable
+        persistence occurs.
         """
 
         source_name = (
@@ -2678,6 +2990,10 @@ class ETLTools:
             )
         )
 
+        # ============================================================
+        # CANDIDATE OUTPUT SCHEMA
+        # ============================================================
+
         output_schema = (
             dataframe_schema(
                 curated
@@ -2713,6 +3029,32 @@ class ETLTools:
         metadata_file = (
             output_directory
             / "curation_metadata.json"
+        )
+
+        quality_rejection_file = (
+            output_directory
+            / "quality_rejections.json"
+        )
+
+        # ============================================================
+        # GOLD QUALITY GATE
+        # ============================================================
+        #
+        # The candidate Gold dataset must pass its configured
+        # quality contract before the existing durable Gold
+        # dataset may be replaced.
+        # ============================================================
+
+        (
+            quality_result,
+            quality_contract_fingerprint_value,
+        ) = self._evaluate_quality_gate(
+            dataframe=curated,
+            layer=DataLayer.GOLD,
+            dataset_name=target_name,
+            rejection_file=(
+                quality_rejection_file
+            ),
         )
 
         # ============================================================
@@ -2781,6 +3123,24 @@ class ETLTools:
             "output_schema_fingerprint": (
                 output_schema_fingerprint
             ),
+
+            # ========================================================
+            # QUALITY METADATA
+            # ========================================================
+
+            "quality_gate": {
+                "contract_configured": (
+                    quality_result
+                    is not None
+                ),
+                "contract_fingerprint": (
+                    quality_contract_fingerprint_value
+                ),
+                "result": (
+                    quality_result
+                ),
+            },
+
             "curation_plan": (
                 plan.model_dump(
                     mode="json"
@@ -2792,6 +3152,10 @@ class ETLTools:
             payload=metadata,
             file_path=metadata_file,
         )
+
+        # ============================================================
+        # LINEAGE
+        # ============================================================
 
         plan_payload = (
             plan.model_dump(
@@ -2834,6 +3198,12 @@ class ETLTools:
         # RESULT
         # ============================================================
 
+        quality_status = (
+            "passed"
+            if quality_result is not None
+            else "not configured"
+        )
+
         return (
             "Silver-to-Gold curation "
             "completed successfully.\n"
@@ -2850,6 +3220,8 @@ class ETLTools:
             f"{list(curated.columns)}\n"
             f"Output schema fingerprint: "
             f"{output_schema_fingerprint}\n"
+            f"Quality contract: "
+            f"{quality_status}\n"
             f"Output file: {output_file}\n"
             f"Metadata: {metadata_file}\n"
             f"Plan summary: {plan.summary}"

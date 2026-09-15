@@ -4,6 +4,10 @@ from utils.etl_tools import ETLTools
 
 from utils.lineage import LineageStore
 
+from utils.data_quality_contracts import (
+    DataQualityContractStore,
+)
+
 
 @pytest.fixture
 def isolated_etl_tools(tmp_path):
@@ -34,6 +38,12 @@ def isolated_etl_tools(tmp_path):
     # during ETLTools.__init__().
     tools.lineage_store = (
         LineageStore(
+            tools.data_root
+        )
+    )
+
+    tools.quality_contract_store = (
+        DataQualityContractStore(
             tools.data_root
         )
     )

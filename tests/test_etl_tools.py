@@ -26,6 +26,20 @@ from utils.incremental_state import (
     IncrementalStateStore
 )
 
+from models.data_quality import (
+    DataQualityContract,
+    NotNullRule,
+    RangeRule,
+)
+
+from utils.data_layers import (
+    DataLayer,
+)
+
+from utils.exceptions import (
+    DataQualityError,
+)
+
 
 def _bronze_dataset_file(
     isolated_etl_tools,
@@ -2534,4 +2548,375 @@ def test_checkpoint_does_not_advance_when_lineage_fails(
     assert (
         state["cursor_value"]
         == 100
+    )
+
+
+def test_silver_quality_gate_passes(
+    isolated_etl_tools,
+):
+    bronze_directory = (
+        isolated_etl_tools.data_root
+        / "bronze"
+        / "orders"
+    )
+
+    bronze_directory.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    bronze_file = (
+        bronze_directory
+        / "extracted_data.csv"
+    )
+
+    pd.DataFrame(
+        {
+            "order_id": [1, 2],
+            "amount": [10, 20],
+        }
+    ).to_csv(
+        bronze_file,
+        index=False,
+    )
+
+    contract = DataQualityContract(
+        name="clean_orders_quality",
+        rules=[
+            NotNullRule(
+                type="not_null",
+                column="order_id",
+            ),
+            RangeRule(
+                type="range",
+                column="amount",
+                min_value=0,
+            ),
+        ],
+    )
+
+    isolated_etl_tools\
+        .quality_contract_store\
+        .save(
+            layer=DataLayer.SILVER,
+            dataset_name="clean_orders",
+            contract=contract,
+        )
+
+    plan = TransformPlan(
+        operations=[],
+        summary="Keep data unchanged.",
+    )
+
+    isolated_etl_tools\
+        .transform_bronze_to_silver(
+            source_dataset_name="orders",
+            target_dataset_name=(
+                "clean_orders"
+            ),
+            output_format="csv",
+            plan=plan,
+        )
+
+    silver_file = (
+        isolated_etl_tools.data_root
+        / "silver"
+        / "clean_orders"
+        / "transformed_data.csv"
+    )
+
+    assert silver_file.exists()
+
+
+
+def test_silver_quality_failure_does_not_overwrite_existing_dataset(
+    isolated_etl_tools,
+):
+    bronze_directory = (
+        isolated_etl_tools.data_root
+        / "bronze"
+        / "orders"
+    )
+
+    bronze_directory.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    pd.DataFrame(
+        {
+            "order_id": [1, 2],
+            "amount": [
+                10,
+                -50,
+            ],
+        }
+    ).to_csv(
+        bronze_directory
+        / "extracted_data.csv",
+        index=False,
+    )
+
+    silver_directory = (
+        isolated_etl_tools.data_root
+        / "silver"
+        / "clean_orders"
+    )
+
+    silver_directory.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    silver_file = (
+        silver_directory
+        / "transformed_data.csv"
+    )
+
+    original = pd.DataFrame(
+        {
+            "order_id": [99],
+            "amount": [100],
+        }
+    )
+
+    original.to_csv(
+        silver_file,
+        index=False,
+    )
+
+    contract = DataQualityContract(
+        name="clean_orders_quality",
+        rules=[
+            RangeRule(
+                type="range",
+                column="amount",
+                min_value=0,
+            )
+        ],
+    )
+
+    isolated_etl_tools\
+        .quality_contract_store\
+        .save(
+            layer=DataLayer.SILVER,
+            dataset_name="clean_orders",
+            contract=contract,
+        )
+
+    plan = TransformPlan(
+        operations=[],
+        summary="Keep candidate unchanged.",
+    )
+
+    with pytest.raises(
+        DataQualityError,
+        match="failed its data-quality contract",
+    ):
+        isolated_etl_tools\
+            .transform_bronze_to_silver(
+                source_dataset_name=(
+                    "orders"
+                ),
+                target_dataset_name=(
+                    "clean_orders"
+                ),
+                output_format="csv",
+                plan=plan,
+            )
+
+    persisted = pd.read_csv(
+        silver_file
+    )
+
+    pd.testing.assert_frame_equal(
+        persisted,
+        original,
+    )
+
+    rejection_file = (
+        silver_directory
+        / "quality_rejections.json"
+    )
+
+    assert rejection_file.exists()
+
+
+
+def test_gold_quality_failure_does_not_overwrite_existing_dataset(
+    isolated_etl_tools,
+):
+    # ============================================================
+    # CREATE SILVER SOURCE
+    # ============================================================
+
+    silver_directory = (
+        isolated_etl_tools.data_root
+        / "silver"
+        / "clean_orders"
+    )
+
+    silver_directory.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    silver_source_file = (
+        silver_directory
+        / "transformed_data.csv"
+    )
+
+    pd.DataFrame(
+        {
+            "order_id": [1, 2],
+            "amount": [
+                10,
+                -50,
+            ],
+        }
+    ).to_csv(
+        silver_source_file,
+        index=False,
+    )
+
+    # ============================================================
+    # CREATE EXISTING GOOD GOLD DATASET
+    # ============================================================
+
+    gold_directory = (
+        isolated_etl_tools.data_root
+        / "gold"
+        / "sales_summary"
+    )
+
+    gold_directory.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    gold_file = (
+        gold_directory
+        / "curated_data.csv"
+    )
+
+    original_gold = pd.DataFrame(
+        {
+            "order_id": [99],
+            "amount": [100],
+        }
+    )
+
+    original_gold.to_csv(
+        gold_file,
+        index=False,
+    )
+
+    # ============================================================
+    # CREATE GOLD QUALITY CONTRACT
+    # ============================================================
+
+    contract = DataQualityContract(
+        name="sales_summary_quality",
+        rules=[
+            RangeRule(
+                type="range",
+                column="amount",
+                min_value=0,
+            )
+        ],
+    )
+
+    isolated_etl_tools\
+        .quality_contract_store\
+        .save(
+            layer=DataLayer.GOLD,
+            dataset_name="sales_summary",
+            contract=contract,
+        )
+
+    # ============================================================
+    # EMPTY TRANSFORMATION PLAN
+    # ============================================================
+    #
+    # This keeps the invalid -50 value so the
+    # Gold quality contract will reject it.
+    # ============================================================
+
+    plan = TransformPlan(
+        operations=[],
+        summary=(
+            "Keep candidate unchanged."
+        ),
+    )
+
+    # ============================================================
+    # LINEAGE BEFORE FAILURE
+    # ============================================================
+
+    events_before = (
+        isolated_etl_tools
+        .lineage_store
+        .get_events()
+    )
+
+    # ============================================================
+    # GOLD QUALITY FAILURE
+    # ============================================================
+
+    with pytest.raises(
+        DataQualityError,
+        match=(
+            "failed its "
+            "data-quality contract"
+        ),
+    ):
+        isolated_etl_tools\
+            .transform_silver_to_gold(
+                source_dataset_name=(
+                    "clean_orders"
+                ),
+                target_dataset_name=(
+                    "sales_summary"
+                ),
+                output_format="csv",
+                plan=plan,
+            )
+
+    # ============================================================
+    # EXISTING GOLD MUST REMAIN UNCHANGED
+    # ============================================================
+
+    persisted_gold = pd.read_csv(
+        gold_file
+    )
+
+    pd.testing.assert_frame_equal(
+        persisted_gold,
+        original_gold,
+    )
+
+    # ============================================================
+    # REJECTION REPORT MUST EXIST
+    # ============================================================
+
+    rejection_file = (
+        gold_directory
+        / "quality_rejections.json"
+    )
+
+    assert rejection_file.exists()
+
+    # ============================================================
+    # NO SUCCESSFUL LINEAGE MUST BE WRITTEN
+    # ============================================================
+
+    events_after = (
+        isolated_etl_tools
+        .lineage_store
+        .get_events()
+    )
+
+    assert (
+        len(events_after)
+        == len(events_before)
     )
