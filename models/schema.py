@@ -214,3 +214,40 @@ class TransformPlan(BaseModel):
     )
 
     summary: str = ""
+
+
+DBTTransformationOperation = Annotated[
+    (
+        SelectColumnsOperation
+        | RenameColumnsOperation
+        | FilterRowsOperation
+        | FillMissingOperation
+        | CastColumnsOperation
+        | StringTransformOperation
+        | GroupByAggregateOperation
+    ),
+    Field(
+        discriminator="type"
+    ),
+]
+
+
+class DBTTransformPlan(BaseModel):
+    """
+    Structured transformation plan for dbt models.
+
+    The LLM decides WHAT should happen.
+
+    Deterministic Python compiles the plan into
+    PostgreSQL/dbt SQL.
+
+    Arbitrary SQL is never supplied by the LLM.
+    """
+
+    operations: list[
+        DBTTransformationOperation
+    ] = Field(
+        default_factory=list
+    )
+
+    summary: str = ""
