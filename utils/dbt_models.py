@@ -686,21 +686,6 @@ class DBTGoldModelManager:
             model_file=model_file,
         )
 
-    def model_file_for_dataset( 
-        self, 
-        dataset_name: str, 
-    ) -> Path:
-        model_name = (
-            self.model_name_for_dataset(
-                dataset_name
-            )
-        )
-
-        return (
-            self.marts_directory
-            / f"{model_name}.sql"
-        )
-
 
     def model_file_for_dataset(
         self,
