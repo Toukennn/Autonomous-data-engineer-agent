@@ -5,6 +5,7 @@ import pytest
 
 from models.schema import (
     AggregationSpec,
+    DBTTransformPlan,
     DropDuplicatesOperation,
     FilterRowsOperation,
     GroupByAggregateOperation,
@@ -16,6 +17,7 @@ from models.schema import (
 )
 
 from utils.api_client import APIExtractionResult
+from utils.dbt_model_metadata import DBTModelMetadataStore
 from utils.exceptions import (
     DatasetError,
     ExternalAPIError,
@@ -3569,10 +3571,9 @@ def test_warehouse_sync_metadata_failure_prevents_lineage(
     )
 
 
-def test_dbt_gold_model_requires_existing_silver(
+def test_dbt_gold_model_requires_silver_metadata(
     isolated_etl_tools,
     tmp_path,
-    monkeypatch,
 ):
     dbt_root = (
         tmp_path
@@ -3593,24 +3594,79 @@ def test_dbt_gold_model_requires_existing_silver(
             )
         )
 
-    monkeypatch.setattr(
-        isolated_etl_tools
-        .dbt_source_registry,
-        "get_registered_source",
-        lambda dataset_name: {
-            "dataset": dataset_name,
-            "columns": [
-                "order_id",
-                "amount",
-            ],
-        },
-    )
+    isolated_etl_tools\
+        .dbt_model_metadata_store = (
+            DBTModelMetadataStore(
+                dbt_project_dir=dbt_root
+            )
+        )
 
     with pytest.raises(
         DatasetError,
         match=(
-            "Silver dbt model "
+            "Silver dbt model metadata "
             "does not exist"
+        ),
+    ):
+        isolated_etl_tools\
+            .create_dbt_gold_model(
+                source_dataset="orders",
+            )
+
+
+def test_dbt_gold_model_requires_silver_model_file(
+    isolated_etl_tools,
+    tmp_path,
+):
+    dbt_root = (
+        tmp_path
+        / "dbt"
+    )
+
+    isolated_etl_tools\
+        .dbt_silver_model_manager = (
+            DBTSilverModelManager(
+                dbt_project_dir=dbt_root
+            )
+        )
+
+    isolated_etl_tools\
+        .dbt_gold_model_manager = (
+            DBTGoldModelManager(
+                dbt_project_dir=dbt_root
+            )
+        )
+
+    isolated_etl_tools\
+        .dbt_model_metadata_store = (
+            DBTModelMetadataStore(
+                dbt_project_dir=dbt_root
+            )
+        )
+
+    isolated_etl_tools\
+        .dbt_model_metadata_store\
+        .save(
+            layer=DataLayer.SILVER,
+            dataset_name="orders",
+            source_dataset_name="orders",
+            model_name="stg_orders",
+            source_model_name=None,
+            input_columns=[
+                "order_id",
+                "amount",
+            ],
+            output_columns=[
+                "order_id",
+                "amount",
+            ],
+            plan=DBTTransformPlan(),
+        )
+
+    with pytest.raises(
+        DatasetError,
+        match=(
+            "Silver dbt model does not exist"
         ),
     ):
         isolated_etl_tools\

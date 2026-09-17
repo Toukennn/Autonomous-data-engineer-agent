@@ -81,6 +81,15 @@ from utils.dbt_execution import (
     DBTExecutor,
 )
 
+from models.schema import (
+    DBTTransformPlan,
+    # existing imports...
+)
+
+from utils.dbt_model_metadata import (
+    DBTModelMetadataStore,
+)
+
 class ETLTools:
     """
     Deterministic ETL operations used by the ETL agent.
@@ -181,6 +190,16 @@ class ETLTools:
             DBTExecutor
             | None
         ) = None
+
+
+        self.dbt_model_metadata_store = (
+            DBTModelMetadataStore(
+                dbt_project_dir=(
+                    self.project_root
+                    / "dbt"
+                )
+            )
+        )
 
     # ============================================================
     # PATH SAFETY
@@ -3804,24 +3823,27 @@ class ETLTools:
         self,
         *,
         source_dataset: str,
+        target_dataset: str | None = None,
+        plan: DBTTransformPlan | None = None,
     ) -> str:
-        """
-        Create a deterministic bootstrap Silver dbt model
-        from one successfully synchronized Bronze source.
-
-        No arbitrary SQL is accepted.
-        """
-
-        safe_dataset_name = (
+        safe_source = (
             validate_dataset_name(
                 source_dataset
+            )
+        )
+
+        safe_target = (
+            validate_dataset_name(
+                target_dataset
+                if target_dataset is not None
+                else safe_source
             )
         )
 
         source_metadata = (
             self.dbt_source_registry
             .get_registered_source(
-                safe_dataset_name
+                safe_source
             )
         )
 
@@ -3840,24 +3862,54 @@ class ETLTools:
                 "its column metadata."
             )
 
+        effective_plan = (
+            plan
+            if plan is not None
+            else DBTTransformPlan()
+        )
+
         result = (
             self.dbt_silver_model_manager
-            .create_source_projection(
+            .create_from_plan(
                 source_dataset=(
-                    safe_dataset_name
+                    safe_source
                 ),
-                columns=columns,
+                target_dataset=(
+                    safe_target
+                ),
+                input_columns=columns,
+                plan=effective_plan,
+            )
+        )
+
+        metadata_file = (
+            self.dbt_model_metadata_store
+            .save(
+                layer=DataLayer.SILVER,
+                dataset_name=(
+                    safe_target
+                ),
+                source_dataset_name=(
+                    safe_source
+                ),
+                model_name=(
+                    result.model_name
+                ),
+                source_model_name=None,
+                input_columns=columns,
+                output_columns=list(
+                    result.output_columns
+                ),
+                plan=effective_plan,
             )
         )
 
         quality_contract = (
             self.quality_contract_store
             .load(
-                layer=(
-                    DataLayer.SILVER
-                ),
+                layer=DataLayer.SILVER,
                 dataset_name=(
-                    safe_dataset_name
+                    safe_target
                 ),
             )
         )
@@ -3865,129 +3917,156 @@ class ETLTools:
         quality_sync = (
             self.dbt_quality_test_manager
             .sync_model_contract(
-                layer=(
-                    DataLayer.SILVER
-                ),
+                layer=DataLayer.SILVER,
                 dataset_name=(
-                    safe_dataset_name
+                    safe_target
                 ),
                 model_name=(
                     result.model_name
                 ),
-                columns=columns,
+                columns=list(
+                    result.output_columns
+                ),
                 contract=(
                     quality_contract
                 ),
             )
         )
 
-        quality_status = (
-            "configured"
-            if quality_sync.contract_configured
-            else "not configured"
-        )
-
-        quality_file = (
-            str(
-                quality_sync.properties_file
-            )
-            if (
-                quality_sync.properties_file
-                is not None
-            )
-            else "not generated"
-        )
-
         return (
             "Silver dbt model created successfully.\n"
-            f"Bronze source: "
-            f"bronze.{safe_dataset_name}\n"
-            f"dbt model: "
-            f"{result.model_name}\n"
-            f"Model file: "
-            f"{result.model_file}"
-            f"\nQuality contract: "
-            f"{quality_status}"
-            f"\ndbt quality tests: "
-            f"{quality_file}"
+            f"Bronze source: bronze.{safe_source}\n"
+            f"Silver dataset: {safe_target}\n"
+            f"dbt model: {result.model_name}\n"
+            f"Output columns: "
+            f"{list(result.output_columns)}\n"
+            f"Model file: {result.model_file}\n"
+            f"Model metadata: {metadata_file}\n"
+            f"Quality contract: "
+            f"{'configured' if quality_sync.contract_configured else 'not configured'}"
         )
 
-        
 
 
     def create_dbt_gold_model(
         self,
         *,
         source_dataset: str,
+        target_dataset: str | None = None,
+        plan: DBTTransformPlan | None = None,
     ) -> str:
-        """
-        Create a deterministic bootstrap Gold dbt mart
-        from an existing generated Silver dbt model.
-
-        No arbitrary SQL is accepted.
-        """
-
-        safe_dataset_name = (
+        safe_source = (
             validate_dataset_name(
                 source_dataset
             )
         )
 
-        # Bronze synchronization metadata remains the
-        # authoritative column list while Silver is still
-        # an identity projection.
-        source_metadata = (
-            self.dbt_source_registry
-            .get_registered_source(
-                safe_dataset_name
+        safe_target = (
+            validate_dataset_name(
+                target_dataset
+                if target_dataset is not None
+                else safe_source
             )
         )
 
-        columns = (
-            source_metadata.get(
-                "columns"
+        silver_metadata = (
+            self.dbt_model_metadata_store
+            .load(
+                layer=DataLayer.SILVER,
+                dataset_name=(
+                    safe_source
+                ),
             )
         )
 
-        if not isinstance(
-            columns,
-            list,
-        ):
+        if silver_metadata is None:
             raise DatasetError(
-                "Registered dbt source is missing "
-                "its column metadata."
+                "Silver dbt model metadata does "
+                f"not exist for dataset: "
+                f"{safe_source}"
             )
 
         silver_model_name = (
             self.dbt_silver_model_manager
             .model_name_for_dataset(
-                safe_dataset_name
+                safe_source
             )
         )
+
+        if (
+            silver_metadata.model_name
+            != silver_model_name
+        ):
+            raise DatasetError(
+                "Silver dbt model metadata does "
+                "not match the expected model."
+            )
 
         silver_model_file = (
             self.dbt_silver_model_manager
             .model_file_for_dataset(
-                safe_dataset_name
+                safe_source
             )
         )
 
         if not silver_model_file.exists():
             raise DatasetError(
                 "Silver dbt model does not exist "
-                f"for dataset: {safe_dataset_name}"
+                f"for dataset: {safe_source}"
             )
+
+        input_columns = list(
+            silver_metadata.output_columns
+        )
+
+        effective_plan = (
+            plan
+            if plan is not None
+            else DBTTransformPlan()
+        )
 
         result = (
             self.dbt_gold_model_manager
-            .create_silver_projection(
+            .create_from_plan(
                 source_dataset=(
-                    safe_dataset_name
+                    safe_source
+                ),
+                target_dataset=(
+                    safe_target
                 ),
                 source_model_name=(
                     silver_model_name
                 ),
-                columns=columns,
+                input_columns=(
+                    input_columns
+                ),
+                plan=effective_plan,
+            )
+        )
+
+        metadata_file = (
+            self.dbt_model_metadata_store
+            .save(
+                layer=DataLayer.GOLD,
+                dataset_name=(
+                    safe_target
+                ),
+                source_dataset_name=(
+                    safe_source
+                ),
+                model_name=(
+                    result.model_name
+                ),
+                source_model_name=(
+                    silver_model_name
+                ),
+                input_columns=(
+                    input_columns
+                ),
+                output_columns=list(
+                    result.output_columns
+                ),
+                plan=effective_plan,
             )
         )
 
@@ -3996,7 +4075,7 @@ class ETLTools:
             .load(
                 layer=DataLayer.GOLD,
                 dataset_name=(
-                    safe_dataset_name
+                    safe_target
                 ),
             )
         )
@@ -4004,54 +4083,35 @@ class ETLTools:
         quality_sync = (
             self.dbt_quality_test_manager
             .sync_model_contract(
-                layer=(
-                    DataLayer.GOLD
-                ),
+                layer=DataLayer.GOLD,
                 dataset_name=(
-                    safe_dataset_name
+                    safe_target
                 ),
                 model_name=(
                     result.model_name
                 ),
-                columns=columns,
+                columns=list(
+                    result.output_columns
+                ),
                 contract=(
                     quality_contract
                 ),
             )
         )
 
-        quality_status = (
-            "configured"
-            if quality_sync.contract_configured
-            else "not configured"
-        )
-
-        quality_file = (
-            str(
-                quality_sync.properties_file
-            )
-            if (
-                quality_sync.properties_file
-                is not None
-            )
-            else "not generated"
-        )
-
-
         return (
             "Gold dbt model created successfully.\n"
-            f"Silver model: "
-            f"{silver_model_name}\n"
-            f"Gold model: "
-            f"{result.model_name}\n"
-            f"Model file: "
-            f"{result.model_file}"
-            f"\nQuality contract: "
-            f"{quality_status}"
-            f"\ndbt quality tests: "
-            f"{quality_file}"
+            f"Silver dataset: {safe_source}\n"
+            f"Gold dataset: {safe_target}\n"
+            f"Silver model: {silver_model_name}\n"
+            f"Gold model: {result.model_name}\n"
+            f"Output columns: "
+            f"{list(result.output_columns)}\n"
+            f"Model file: {result.model_file}\n"
+            f"Model metadata: {metadata_file}\n"
+            f"Quality contract: "
+            f"{'configured' if quality_sync.contract_configured else 'not configured'}"
         )
-
 
     def _get_dbt_executor(
         self,
@@ -4180,27 +4240,34 @@ class ETLTools:
         # authoritative column list.
         # ============================================================
 
-        source_metadata = (
-            self.dbt_source_registry
-            .get_registered_source(
-                safe_dataset_name
+        model_metadata = (
+            self.dbt_model_metadata_store
+            .load(
+                layer=layer,
+                dataset_name=(
+                    safe_dataset_name
+                ),
             )
         )
 
-        columns = (
-            source_metadata.get(
-                "columns"
+        if model_metadata is None:
+            raise DatasetError(
+                "dbt model metadata does not exist "
+                f"for dataset: {safe_dataset_name}"
             )
-        )
 
-        if not isinstance(
-            columns,
-            list,
+        if (
+            model_metadata.model_name
+            != model_name
         ):
             raise DatasetError(
-                "Registered dbt source is missing "
-                "its column metadata."
+                "dbt model metadata does not match "
+                "the generated model."
             )
+
+        columns = list(
+            model_metadata.output_columns
+        )
 
         # ============================================================
         # REFRESH QUALITY GOVERNANCE

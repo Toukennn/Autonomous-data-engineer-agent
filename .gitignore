@@ -64,3 +64,6 @@ dbt/models/staging/generated/
 
 # Runtime-generated dbt Gold models
 dbt/models/marts/generated/
+
+# Runtime dbt model metadata
+dbt/generated_metadata/

@@ -1,5 +1,4 @@
 import hashlib
-import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,15 +10,23 @@ from utils.exceptions import (
     DatasetError,
 )
 
+from models.schema import (
+    DBTTransformPlan,
+)
+from utils.dbt_sql import (
+    DBTSQLCompiler,
+)
+
 
 @dataclass(
     frozen=True
 )
 class DBTSilverModelResult:
     source_dataset: str
+    target_dataset: str
     model_name: str
     model_file: Path
-
+    output_columns: tuple[str, ...]
 
 class DBTSilverModelManager:
     """
@@ -50,6 +57,10 @@ class DBTSilverModelManager:
             / "staging"
             / "generated"
         ).resolve()
+
+        self.sql_compiler = (
+            DBTSQLCompiler()
+        )
 
         try:
             self.staging_directory.relative_to(
@@ -276,67 +287,67 @@ class DBTSilverModelManager:
         source_dataset: str,
         columns: list[str],
     ) -> DBTSilverModelResult:
-        """
-        Create the first deterministic Silver model.
+        return self.create_from_plan(
+            source_dataset=(
+                source_dataset
+            ),
+            input_columns=columns,
+            plan=DBTTransformPlan(),
+        )
 
-        This is intentionally only an explicit projection:
-
-            Bronze source
-                ↓
-            Silver staging view
-
-        Arbitrary transformation SQL is not accepted yet.
-        """
-
-        safe_dataset_name = (
+    def create_from_plan(
+        self,
+        *,
+        source_dataset: str,
+        input_columns: list[str],
+        plan: DBTTransformPlan,
+        target_dataset: str | None = None,
+    ) -> DBTSilverModelResult:
+        safe_source = (
             validate_dataset_name(
                 source_dataset
             )
         )
 
+        safe_target = (
+            validate_dataset_name(
+                target_dataset
+                if target_dataset is not None
+                else safe_source
+            )
+        )
+
         self._validate_columns(
-            columns
+            input_columns
         )
 
         model_name = (
             self.model_name_for_dataset(
-                safe_dataset_name
+                safe_target
             )
         )
 
         model_file = (
             self.model_file_for_dataset(
-                safe_dataset_name
+                safe_target
             )
         )
 
-        rendered_columns = (
-            ",\n".join(
-                "    "
-                + self._quote_identifier(
-                    column
-                )
-                for column in columns
+        compiled = (
+            self.sql_compiler
+            .compile(
+                plan=plan,
+                input_columns=(
+                    input_columns
+                ),
+                relation_kind=(
+                    "bronze_source"
+                ),
+                relation_name=(
+                    safe_source
+                ),
+                allow_aggregation=False,
             )
-        )
-
-        bronze_source = json.dumps(
-            "bronze"
-        )
-
-        dataset_literal = json.dumps(
-            safe_dataset_name,
-            ensure_ascii=False,
-        )
-
-        sql_payload = (
-            "select\n"
-            f"{rendered_columns}\n"
-            "from "
-            "{{ source("
-            f"{bronze_source}, "
-            f"{dataset_literal}"
-            ") }}\n"
         )
 
         temp_file = (
@@ -352,7 +363,7 @@ class DBTSilverModelManager:
             )
 
             temp_file.write_text(
-                sql_payload,
+                compiled.sql,
                 encoding="utf-8",
             )
 
@@ -375,10 +386,16 @@ class DBTSilverModelManager:
 
         return DBTSilverModelResult(
             source_dataset=(
-                safe_dataset_name
+                safe_source
+            ),
+            target_dataset=(
+                safe_target
             ),
             model_name=model_name,
             model_file=model_file,
+            output_columns=(
+                compiled.output_columns
+            ),
         )
 
 
@@ -387,9 +404,11 @@ class DBTSilverModelManager:
 )
 class DBTGoldModelResult:
     source_dataset: str
+    target_dataset: str
     source_model_name: str
     model_name: str
     model_file: Path
+    output_columns: tuple[str, ...]
 
 
 class DBTGoldModelManager:
@@ -424,6 +443,10 @@ class DBTGoldModelManager:
             / "marts"
             / "generated"
         ).resolve()
+
+        self.sql_compiler = (
+            DBTSQLCompiler()
+        )
 
         try:
             self.marts_directory.relative_to(
@@ -581,16 +604,37 @@ class DBTGoldModelManager:
         source_model_name: str,
         columns: list[str],
     ) -> DBTGoldModelResult:
-        """
-        Create a deterministic bootstrap Gold mart.
+        return self.create_from_plan(
+            source_dataset=(
+                source_dataset
+            ),
+            source_model_name=(
+                source_model_name
+            ),
+            input_columns=columns,
+            plan=DBTTransformPlan(),
+        )
 
-        The generated model may reference only one
-        validated Silver dbt model through ref().
-        """
-
-        safe_dataset_name = (
+    def create_from_plan(
+        self,
+        *,
+        source_dataset: str,
+        source_model_name: str,
+        input_columns: list[str],
+        plan: DBTTransformPlan,
+        target_dataset: str | None = None,
+    ) -> DBTGoldModelResult:
+        safe_source = (
             validate_dataset_name(
                 source_dataset
+            )
+        )
+
+        safe_target = (
+            validate_dataset_name(
+                target_dataset
+                if target_dataset is not None
+                else safe_source
             )
         )
 
@@ -600,45 +644,36 @@ class DBTGoldModelManager:
 
         DBTSilverModelManager\
             ._validate_columns(
-                columns
+                input_columns
             )
 
         model_name = (
             self.model_name_for_dataset(
-                safe_dataset_name
+                safe_target
             )
         )
 
         model_file = (
-            self.model_file_for_dataset (
-                safe_dataset_name
+            self.model_file_for_dataset(
+                safe_target
             )
         )
 
-        rendered_columns = (
-            ",\n".join(
-                "    "
-                + DBTSilverModelManager
-                ._quote_identifier(
-                    column
-                )
-                for column in columns
+        compiled = (
+            self.sql_compiler
+            .compile(
+                plan=plan,
+                input_columns=(
+                    input_columns
+                ),
+                relation_kind=(
+                    "silver_ref"
+                ),
+                relation_name=(
+                    source_model_name
+                ),
+                allow_aggregation=True,
             )
-        )
-
-        silver_model_literal = (
-            json.dumps(
-                source_model_name
-            )
-        )
-
-        sql_payload = (
-            "select\n"
-            f"{rendered_columns}\n"
-            "from "
-            "{{ ref("
-            f"{silver_model_literal}"
-            ") }}\n"
         )
 
         temp_file = (
@@ -654,7 +689,7 @@ class DBTGoldModelManager:
             )
 
             temp_file.write_text(
-                sql_payload,
+                compiled.sql,
                 encoding="utf-8",
             )
 
@@ -677,13 +712,19 @@ class DBTGoldModelManager:
 
         return DBTGoldModelResult(
             source_dataset=(
-                safe_dataset_name
+                safe_source
+            ),
+            target_dataset=(
+                safe_target
             ),
             source_model_name=(
                 source_model_name
             ),
             model_name=model_name,
             model_file=model_file,
+            output_columns=(
+                compiled.output_columns
+            ),
         )
 
 
