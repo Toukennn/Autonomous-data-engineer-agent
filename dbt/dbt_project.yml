@@ -7,6 +7,9 @@ profile: "autonomous_data_engineer"
 model-paths:
   - "models"
 
+test-paths:
+  - "tests"
+
 target-path: "target"
 
 clean-targets:

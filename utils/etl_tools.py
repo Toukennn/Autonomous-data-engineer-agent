@@ -73,6 +73,10 @@ from utils.dbt_models import (
     DBTSilverModelManager,
 )
 
+from utils.dbt_quality import (
+    DBTQualityTestManager,
+)
+
 class ETLTools:
     """
     Deterministic ETL operations used by the ETL agent.
@@ -153,6 +157,15 @@ class ETLTools:
 
         self.dbt_gold_model_manager = (
             DBTGoldModelManager(
+                dbt_project_dir=(
+                    self.project_root
+                    / "dbt"
+                )
+            )
+        )
+
+        self.dbt_quality_test_manager = (
+            DBTQualityTestManager(
                 dbt_project_dir=(
                     self.project_root
                     / "dbt"
@@ -3828,6 +3841,54 @@ class ETLTools:
             )
         )
 
+        quality_contract = (
+            self.quality_contract_store
+            .load(
+                layer=(
+                    DataLayer.SILVER
+                ),
+                dataset_name=(
+                    safe_dataset_name
+                ),
+            )
+        )
+
+        quality_sync = (
+            self.dbt_quality_test_manager
+            .sync_model_contract(
+                layer=(
+                    DataLayer.SILVER
+                ),
+                dataset_name=(
+                    safe_dataset_name
+                ),
+                model_name=(
+                    result.model_name
+                ),
+                columns=columns,
+                contract=(
+                    quality_contract
+                ),
+            )
+        )
+
+        quality_status = (
+            "configured"
+            if quality_sync.contract_configured
+            else "not configured"
+        )
+
+        quality_file = (
+            str(
+                quality_sync.properties_file
+            )
+            if (
+                quality_sync.properties_file
+                is not None
+            )
+            else "not generated"
+        )
+
         return (
             "Silver dbt model created successfully.\n"
             f"Bronze source: "
@@ -3836,7 +3897,13 @@ class ETLTools:
             f"{result.model_name}\n"
             f"Model file: "
             f"{result.model_file}"
+            f"\nQuality contract: "
+            f"{quality_status}"
+            f"\ndbt quality tests: "
+            f"{quality_file}"
         )
+
+        
 
 
     def create_dbt_gold_model(
@@ -3915,6 +3982,53 @@ class ETLTools:
             )
         )
 
+        quality_contract = (
+            self.quality_contract_store
+            .load(
+                layer=DataLayer.GOLD,
+                dataset_name=(
+                    safe_dataset_name
+                ),
+            )
+        )
+
+        quality_sync = (
+            self.dbt_quality_test_manager
+            .sync_model_contract(
+                layer=(
+                    DataLayer.GOLD
+                ),
+                dataset_name=(
+                    safe_dataset_name
+                ),
+                model_name=(
+                    result.model_name
+                ),
+                columns=columns,
+                contract=(
+                    quality_contract
+                ),
+            )
+        )
+
+        quality_status = (
+            "configured"
+            if quality_sync.contract_configured
+            else "not configured"
+        )
+
+        quality_file = (
+            str(
+                quality_sync.properties_file
+            )
+            if (
+                quality_sync.properties_file
+                is not None
+            )
+            else "not generated"
+        )
+
+
         return (
             "Gold dbt model created successfully.\n"
             f"Silver model: "
@@ -3923,4 +4037,8 @@ class ETLTools:
             f"{result.model_name}\n"
             f"Model file: "
             f"{result.model_file}"
+            f"\nQuality contract: "
+            f"{quality_status}"
+            f"\ndbt quality tests: "
+            f"{quality_file}"
         )
