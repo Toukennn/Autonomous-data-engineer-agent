@@ -77,6 +77,10 @@ from utils.dbt_quality import (
     DBTQualityTestManager,
 )
 
+from utils.dbt_execution import (
+    DBTExecutor,
+)
+
 class ETLTools:
     """
     Deterministic ETL operations used by the ETL agent.
@@ -172,6 +176,11 @@ class ETLTools:
                 )
             )
         )
+
+        self._dbt_executor: (
+            DBTExecutor
+            | None
+        ) = None
 
     # ============================================================
     # PATH SAFETY
@@ -4041,4 +4050,220 @@ class ETLTools:
             f"{quality_status}"
             f"\ndbt quality tests: "
             f"{quality_file}"
+        )
+
+
+    def _get_dbt_executor(
+        self,
+    ) -> DBTExecutor:
+        """
+        Lazily initialize the bounded dbt executor.
+        """
+
+        if self._dbt_executor is None:
+
+            database_settings = (
+                get_database_settings()
+            )
+
+            runtime_settings = (
+                get_runtime_settings()
+            )
+
+            self._dbt_executor = (
+                DBTExecutor(
+                    dbt_project_dir=(
+                        self.project_root
+                        / "dbt"
+                    ),
+                    db_config=(
+                        database_settings
+                        .psycopg_config()
+                    ),
+                    target_schema=(
+                        runtime_settings
+                        .dbt_target_schema
+                    ),
+                    threads=(
+                        runtime_settings
+                        .dbt_threads
+                    ),
+                )
+            )
+
+        return self._dbt_executor
+
+
+
+    def build_dbt_dataset(
+        self,
+        *,
+        layer: DataLayer,
+        dataset_name: str,
+    ) -> str:
+        """
+        Build one application-controlled dbt dataset.
+
+        The caller chooses only:
+        - Silver or Gold
+        - logical dataset name
+
+        Model names, selectors, project paths,
+        credentials, and dbt arguments remain
+        application-controlled.
+        """
+
+        if layer not in {
+            DataLayer.SILVER,
+            DataLayer.GOLD,
+        }:
+            raise DatasetError(
+                "dbt builds support "
+                "Silver and Gold only."
+            )
+
+        safe_dataset_name = (
+            validate_dataset_name(
+                dataset_name
+            )
+        )
+
+        # ============================================================
+        # RESOLVE GENERATED MODEL
+        # ============================================================
+
+        if layer == DataLayer.SILVER:
+
+            model_name = (
+                self.dbt_silver_model_manager
+                .model_name_for_dataset(
+                    safe_dataset_name
+                )
+            )
+
+            model_file = (
+                self.dbt_silver_model_manager
+                .model_file_for_dataset(
+                    safe_dataset_name
+                )
+            )
+
+        else:
+
+            model_name = (
+                self.dbt_gold_model_manager
+                .model_name_for_dataset(
+                    safe_dataset_name
+                )
+            )
+
+            model_file = (
+                self.dbt_gold_model_manager
+                .model_file_for_dataset(
+                    safe_dataset_name
+                )
+            )
+
+        if not model_file.exists():
+            raise DatasetError(
+                f"{layer.value.title()} dbt model "
+                "does not exist for dataset: "
+                f"{safe_dataset_name}"
+            )
+
+        # ============================================================
+        # CURRENT MODEL COLUMNS
+        # ============================================================
+        #
+        # During the bootstrap identity-model phase,
+        # Bronze synchronization metadata remains the
+        # authoritative column list.
+        # ============================================================
+
+        source_metadata = (
+            self.dbt_source_registry
+            .get_registered_source(
+                safe_dataset_name
+            )
+        )
+
+        columns = (
+            source_metadata.get(
+                "columns"
+            )
+        )
+
+        if not isinstance(
+            columns,
+            list,
+        ):
+            raise DatasetError(
+                "Registered dbt source is missing "
+                "its column metadata."
+            )
+
+        # ============================================================
+        # REFRESH QUALITY GOVERNANCE
+        # ============================================================
+        #
+        # Important:
+        # A contract may have changed after the model was
+        # originally generated. Always synchronize the latest
+        # persisted contract immediately before execution.
+        # ============================================================
+
+        contract = (
+            self.quality_contract_store
+            .load(
+                layer=layer,
+                dataset_name=(
+                    safe_dataset_name
+                ),
+            )
+        )
+
+        quality_sync = (
+            self.dbt_quality_test_manager
+            .sync_model_contract(
+                layer=layer,
+                dataset_name=(
+                    safe_dataset_name
+                ),
+                model_name=model_name,
+                columns=columns,
+                contract=contract,
+            )
+        )
+
+        # ============================================================
+        # DBT BUILD
+        # ============================================================
+
+        result = (
+            self._get_dbt_executor()
+            .build_model(
+                layer=layer,
+                dataset_name=(
+                    safe_dataset_name
+                ),
+                model_name=model_name,
+            )
+        )
+
+        quality_status = (
+            "configured"
+            if (
+                quality_sync
+                .contract_configured
+            )
+            else "not configured"
+        )
+
+        return (
+            "dbt build completed successfully.\n"
+            f"Layer: {layer.value}\n"
+            f"Dataset: {safe_dataset_name}\n"
+            f"Model: {result.model_name}\n"
+            f"Quality contract: "
+            f"{quality_status}"
         )

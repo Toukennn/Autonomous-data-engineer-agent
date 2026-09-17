@@ -94,6 +94,33 @@ class WarehouseLoadError(
     """
 
 
+class DBTExecutionError(
+    ETLError # the parent is ETLError because dbt failures are not necessarily database failures
+):
+    """
+    A bounded dbt invocation failed.
+
+    details contains safe execution metadata only.
+    Raw database credentials, SQL, and dbt logs are
+    intentionally excluded.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        details: dict[
+            str,
+            object,
+        ],
+    ):
+        super().__init__(
+            message
+        )
+
+        self.details = details
+
+
 class ExternalAPIError(ETLError):
     """
     External API extraction failed.

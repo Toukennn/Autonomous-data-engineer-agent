@@ -175,6 +175,25 @@ class RuntimeSettings(_BaseAppSettings):
         le=50,
     )
 
+    dbt_target_schema: str = Field(
+        default="dbt_dev",
+        validation_alias=(
+            "DBT_TARGET_SCHEMA"
+        ),
+        min_length=1,
+        pattern=(
+            r"^[a-zA-Z_]"
+            r"[a-zA-Z0-9_]*$"
+        ),
+    )
+
+    dbt_threads: int = Field(
+        default=4,
+        validation_alias="DBT_THREADS",
+        ge=1,
+        le=32,
+    )
+
 class LLMSettings(_BaseAppSettings):
     """
     LLM provider and model configuration.

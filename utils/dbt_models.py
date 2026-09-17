@@ -610,8 +610,9 @@ class DBTGoldModelManager:
         )
 
         model_file = (
-            self.marts_directory
-            / f"{model_name}.sql"
+            self.model_file_for_dataset (
+                safe_dataset_name
+            )
         )
 
         rendered_columns = (
@@ -683,4 +684,40 @@ class DBTGoldModelManager:
             ),
             model_name=model_name,
             model_file=model_file,
+        )
+
+    def model_file_for_dataset( 
+        self, 
+        dataset_name: str, 
+    ) -> Path:
+        model_name = (
+            self.model_name_for_dataset(
+                dataset_name
+            )
+        )
+
+        return (
+            self.marts_directory
+            / f"{model_name}.sql"
+        )
+
+
+    def model_file_for_dataset(
+        self,
+        dataset_name: str,
+    ) -> Path:
+        """
+        Resolve the deterministic generated Gold
+        model file for one logical dataset.
+        """
+
+        model_name = (
+            self.model_name_for_dataset(
+                dataset_name
+            )
+        )
+
+        return (
+            self.marts_directory
+            / f"{model_name}.sql"
         )
