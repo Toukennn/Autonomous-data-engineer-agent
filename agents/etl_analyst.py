@@ -1167,22 +1167,6 @@ def llm_node(state: ETLAgentSchema):
     - Never modify Silver while producing Gold.
     - Do not claim an operation succeeded unless its tool succeeded.
     - Use csv when no output format is specified.
-    - When the user explicitly requests dbt, PostgreSQL,
-      warehouse-backed transformations, or warehouse models,
-      use the dbt tools.
-    - Do not manually call or simulate dbt commands.
-    - Never generate SQL yourself.
-    - Never invent dbt model names or selectors.
-    - The dbt tools internally generate and execute models.
-    - A dbt Gold dataset must come from an existing dbt
-    Silver dataset.
-    - Do not mix a file-backed Silver dataset with a dbt
-    Gold dataset, or vice versa, unless the user explicitly
-    asks for migration between the two systems.
-    - If quality requirements are explicitly requested,
-    configure the target dataset's contract BEFORE
-    invoking its dbt transformation tool.
-
 
     Data-quality rules:
 
@@ -1216,6 +1200,49 @@ def llm_node(state: ETLAgentSchema):
 
     If an earlier stage fails, do not continue to downstream stages.
     Explain the failure instead.
+
+    dbt / warehouse rules:
+
+    - When the user explicitly requests dbt, PostgreSQL,
+      warehouse-backed transformations, or warehouse models,
+      use the dbt transformation tools.
+
+    - For dbt Silver transformations, use
+      dbt_bronze_to_silver_tool.
+
+    - For dbt Gold transformations, use
+      dbt_silver_to_gold_tool.
+
+    - Never generate SQL yourself.
+
+    - Never generate Jinja yourself.
+
+    - Never invent dbt model names or selectors.
+
+    - Never invoke or simulate dbt CLI commands.
+
+    - Never expose database credentials.
+
+    - The dbt tools internally control SQL compilation,
+      model paths, selectors, profiles, and execution.
+
+    - A dbt Gold dataset must be created from an existing
+      dbt Silver dataset.
+
+    - Do not mix the legacy file-backed transformation
+      path with the dbt transformation path unless the
+      user explicitly requests such a migration.
+
+    - For a multi-stage dbt workflow, execute:
+
+        extract_load_tool
+            ↓
+        dbt_bronze_to_silver_tool
+            ↓
+        dbt_silver_to_gold_tool
+
+    - If one dbt stage fails, do not execute any
+      downstream stage.
 """
 
     conversation = [
