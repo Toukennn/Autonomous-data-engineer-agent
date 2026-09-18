@@ -1,10 +1,13 @@
 import psycopg2
+import json 
+import re
 from psycopg2 import sql
 
 from config.settings import (
     get_database_settings,
     get_runtime_settings,
 )
+
 from utils.exceptions import (
     DatabaseConnectionError,
     DatabaseQueryError,
@@ -187,6 +190,329 @@ class DatabaseUtil:
     # ========================================================
     # SAFE QUERY EXECUTION
     # ========================================================
+
+
+        # ========================================================
+    # GOVERNED ANALYTICS CATALOG
+    # ========================================================
+
+    ANALYTICS_SCHEMA_PATTERN = re.compile(
+        r"^[A-Za-z_][A-Za-z0-9_]*$"
+    )
+
+    POSTGRES_IDENTIFIER_MAX_BYTES = 63
+
+    @classmethod
+    def analytics_schema_names(
+        cls,
+        target_schema: str,
+    ) -> tuple[str, str]:
+        """
+        Resolve the PostgreSQL schemas exposed
+        to analytical query generation.
+
+        Bronze and public are deliberately excluded.
+        """
+
+        if (
+            not isinstance(
+                target_schema,
+                str,
+            )
+            or not cls
+            .ANALYTICS_SCHEMA_PATTERN
+            .fullmatch(
+                target_schema
+            )
+        ):
+            raise DatabaseQueryError(
+                "Invalid dbt target schema "
+                "for analytics catalog."
+            )
+
+        silver_schema = (
+            f"{target_schema}_silver"
+        )
+
+        gold_schema = (
+            f"{target_schema}_gold"
+        )
+
+        for schema_name in (
+            silver_schema,
+            gold_schema,
+        ):
+            if (
+                len(
+                    schema_name.encode(
+                        "utf-8"
+                    )
+                )
+                > cls
+                .POSTGRES_IDENTIFIER_MAX_BYTES
+            ):
+                raise DatabaseQueryError(
+                    "Analytics schema exceeds "
+                    "PostgreSQL's 63-byte "
+                    "identifier limit."
+                )
+
+        return (
+            silver_schema,
+            gold_schema,
+        )
+
+    def analytics_catalog(
+        self,
+        *,
+        target_schema: str,
+    ) -> dict:
+        """
+        Return the application-controlled catalog
+        of dbt Silver and Gold relations.
+
+        Only metadata is returned.
+        Raw/sample rows are never included.
+        """
+
+        (
+            silver_schema,
+            gold_schema,
+        ) = self.analytics_schema_names(
+            target_schema
+        )
+
+        allowed_schemas = (
+            silver_schema,
+            gold_schema,
+        )
+
+        layer_by_schema = {
+            silver_schema: "silver",
+            gold_schema: "gold",
+        }
+
+        connection = (
+            self._connect()
+        )
+
+        try:
+            connection.set_session(
+                readonly=True,
+                autocommit=False,
+            )
+
+            with connection.cursor() as cursor:
+
+                cursor.execute(
+                    """
+                    SELECT
+                        tables.table_schema,
+                        tables.table_name,
+                        tables.table_type,
+                        columns.column_name,
+                        columns.data_type,
+                        columns.ordinal_position
+                    FROM information_schema.tables
+                    AS tables
+                    JOIN information_schema.columns
+                    AS columns
+                      ON (
+                          columns.table_schema
+                          = tables.table_schema
+                          AND columns.table_name
+                          = tables.table_name
+                      )
+                    WHERE tables.table_schema
+                          = ANY(%s)
+                      AND tables.table_type
+                          IN (
+                              'BASE TABLE',
+                              'VIEW'
+                          )
+                    ORDER BY
+                        tables.table_schema,
+                        tables.table_name,
+                        columns.ordinal_position;
+                    """,
+                    (
+                        list(
+                            allowed_schemas
+                        ),
+                    ),
+                )
+
+                rows = (
+                    cursor.fetchall()
+                )
+
+            connection.rollback()
+
+        except psycopg2.Error as exc:
+
+            connection.rollback()
+
+            raise DatabaseQueryError(
+                "Failed to retrieve governed "
+                "analytics catalog."
+            ) from exc
+
+        finally:
+            connection.close()
+
+        relations_by_schema: dict[
+            str,
+            dict[str, dict],
+        ] = {
+            silver_schema: {},
+            gold_schema: {},
+        }
+
+        for (
+            schema_name,
+            relation_name,
+            relation_type,
+            column_name,
+            data_type,
+            _ordinal_position,
+        ) in rows:
+
+            if (
+                schema_name
+                not in layer_by_schema
+            ):
+                raise DatabaseQueryError(
+                    "Analytics catalog returned "
+                    "an unauthorized schema."
+                )
+
+            if (
+                relation_type
+                == "BASE TABLE"
+            ):
+                normalized_type = (
+                    "table"
+                )
+
+            elif (
+                relation_type
+                == "VIEW"
+            ):
+                normalized_type = (
+                    "view"
+                )
+
+            else:
+                raise DatabaseQueryError(
+                    "Analytics catalog returned "
+                    "an unsupported relation type."
+                )
+
+            schema_relations = (
+                relations_by_schema[
+                    schema_name
+                ]
+            )
+
+            relation = (
+                schema_relations
+                .setdefault(
+                    relation_name,
+                    {
+                        "name": (
+                            relation_name
+                        ),
+                        "type": (
+                            normalized_type
+                        ),
+                        "columns": [],
+                    },
+                )
+            )
+
+            if (
+                relation["type"]
+                != normalized_type
+            ):
+                raise DatabaseQueryError(
+                    "Analytics catalog contains "
+                    "inconsistent relation metadata."
+                )
+
+            relation[
+                "columns"
+            ].append(
+                {
+                    "name": (
+                        column_name
+                    ),
+                    "data_type": (
+                        data_type
+                    ),
+                }
+            )
+
+        schemas = []
+
+        for schema_name in (
+            silver_schema,
+            gold_schema,
+        ):
+
+            relations = (
+                relations_by_schema[
+                    schema_name
+                ]
+            )
+
+            schemas.append(
+                {
+                    "name": (
+                        schema_name
+                    ),
+                    "layer": (
+                        layer_by_schema[
+                            schema_name
+                        ]
+                    ),
+                    "relations": [
+                        relations[name]
+                        for name
+                        in sorted(
+                            relations
+                        )
+                    ],
+                }
+            )
+
+        return {
+            "catalog_version": 1,
+            "schemas": schemas,
+        }
+
+    def analytics_catalog_context(
+        self,
+        *,
+        target_schema: str,
+    ) -> str:
+        """
+        Serialize the governed analytics
+        catalog for LLM context.
+        """
+
+        catalog = (
+            self.analytics_catalog(
+                target_schema=(
+                    target_schema
+                )
+            )
+        )
+
+        return json.dumps(
+            catalog,
+            indent=2,
+            ensure_ascii=False,
+        )
 
     def execute_read_only(
         self,
