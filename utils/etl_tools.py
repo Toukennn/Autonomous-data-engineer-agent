@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 from datetime import datetime, timezone
+from dataclasses import dataclass
 
 import pandas as pd
 from utils.api_client import APIClient
@@ -78,6 +79,7 @@ from utils.dbt_quality import (
 )
 
 from utils.dbt_execution import (
+    DBTBuildResult,
     DBTExecutor,
 )
 
@@ -89,6 +91,31 @@ from models.schema import (
 from utils.dbt_model_metadata import (
     DBTModelMetadataStore,
 )
+
+
+@dataclass(
+    frozen=True
+)
+class DBTDatasetBuildReport:
+    """
+    Safe deterministic result of one completed
+    application-controlled dbt dataset build.
+
+    This object is internal application state.
+    It is not directly exposed to the LLM.
+    """
+
+    content: str
+    build_result: DBTBuildResult
+
+    lineage_event_id: str
+    plan_fingerprint: str
+
+    quality_contract_configured: bool
+    quality_contract_fingerprint: (
+        str | None
+    )
+
 
 class ETLTools:
     """
@@ -4275,7 +4302,7 @@ class ETLTools:
         *,
         layer: DataLayer,
         dataset_name: str,
-    ) -> str:
+    ) -> DBTDatasetBuildReport:
         """
         Build one application-controlled dbt dataset.
 
@@ -4483,7 +4510,7 @@ class ETLTools:
             else "not configured"
         )
 
-        return (
+        content = (
             "dbt build completed successfully.\n"
             f"Layer: {layer.value}\n"
             f"Dataset: {safe_dataset_name}\n"
@@ -4497,4 +4524,24 @@ class ETLTools:
             f"{quality_status}\n"
             f"Lineage event: "
             f"{lineage_event_id}"
+        )
+
+        return DBTDatasetBuildReport(
+            content=content,
+            build_result=result,
+            lineage_event_id=(
+                lineage_event_id
+            ),
+            plan_fingerprint=(
+                model_metadata
+                .plan_fingerprint
+            ),
+            quality_contract_configured=(
+                quality_sync
+                .contract_configured
+            ),
+            quality_contract_fingerprint=(
+                quality_sync
+                .contract_fingerprint
+            ),
         )

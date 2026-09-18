@@ -434,3 +434,73 @@ def test_dbt_environment_is_restored(
         ]
         == "original"
     )
+
+
+def test_dbt_artifact_is_attached_to_build_result(
+    tmp_path,
+):
+    dbt_root = (
+        tmp_path
+        / "dbt"
+    )
+
+    _create_model(
+        dbt_root=dbt_root,
+        layer=DataLayer.SILVER,
+        model_name="stg_orders",
+    )
+
+    class FakeRunner:
+        def invoke(
+            self,
+            args,
+        ):
+            return SimpleNamespace(
+                success=True,
+                exception=None,
+            )
+
+    executor = DBTExecutor(
+        dbt_project_dir=(
+            dbt_root
+        ),
+        db_config=(
+            _db_config()
+        ),
+        target_schema=(
+            "dbt_test"
+        ),
+        threads=1,
+        runner_factory=(
+            FakeRunner
+        ),
+        artifact_reader=(
+            FakeArtifactReader()
+        ),
+    )
+
+    result = (
+        executor.build_model(
+            layer=DataLayer.SILVER,
+            dataset_name="orders",
+            model_name="stg_orders",
+        )
+    )
+
+    assert (
+        result.artifact
+        .target_model_name
+        == "stg_orders"
+    )
+
+    assert (
+        result.artifact
+        .target_status
+        == "success"
+    )
+
+    assert (
+        result.artifact
+        .relation_schema
+        == "dbt_test_silver"
+    )

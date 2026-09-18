@@ -15,6 +15,23 @@ from utils.exceptions import (
     DataQualityError,
 )
 
+from utils.data_layers import (
+    DataLayer,
+)
+
+from utils.dbt_artifacts import (
+    DBTBuildArtifactSummary,
+)
+
+from utils.dbt_execution import (
+    DBTBuildResult,
+)
+
+from utils.etl_tools import (
+    DBTDatasetBuildReport,
+)
+
+
 @pytest.fixture(
     autouse=True
 )
@@ -1167,4 +1184,205 @@ def test_etl_agent_orchestrates_dbt_medallion_in_order(
     assert (
         result["messages"][-1].content
         == "dbt pipeline completed."
+    )
+
+
+def test_dbt_success_records_safe_observability(
+    monkeypatch,
+    isolated_execution_store,
+):
+    calls = []
+
+    artifact = (
+        DBTBuildArtifactSummary(
+            invocation_id=(
+                "12345678-1234-5678-"
+                "1234-567812345678"
+            ),
+            command="build",
+            target_model_unique_id=(
+                "model."
+                "autonomous_data_engineer."
+                "stg_orders"
+            ),
+            target_model_name=(
+                "stg_orders"
+            ),
+            target_status="success",
+            target_execution_time_seconds=(
+                0.2
+            ),
+            relation_schema=(
+                "dbt_test_silver"
+            ),
+            relation_name=(
+                "stg_orders"
+            ),
+            dependency_unique_ids=(),
+            executed_model_unique_ids=(
+                (
+                    "model."
+                    "autonomous_data_engineer."
+                    "stg_orders"
+                ),
+            ),
+            tests=(),
+            elapsed_time_seconds=(
+                0.3
+            ),
+        )
+    )
+
+    report = (
+        DBTDatasetBuildReport(
+            content=(
+                "dbt build completed."
+            ),
+            build_result=(
+                DBTBuildResult(
+                    layer=(
+                        DataLayer.SILVER
+                    ),
+                    dataset_name=(
+                        "clean_orders"
+                    ),
+                    model_name=(
+                        "stg_orders"
+                    ),
+                    selector=(
+                        "stg_orders"
+                    ),
+                    artifact=artifact,
+                )
+            ),
+            lineage_event_id=(
+                "lineage-event-123"
+            ),
+            plan_fingerprint=(
+                "a" * 64
+            ),
+            quality_contract_configured=(
+                False
+            ),
+            quality_contract_fingerprint=(
+                None
+            ),
+        )
+    )
+
+    fake_llm = FakeLLM(
+        [
+            make_tool_call(
+                name=(
+                    "dbt_bronze_to_silver_tool"
+                ),
+                call_id="silver",
+                args={
+                    "source_dataset_name": (
+                        "orders"
+                    ),
+                    "target_dataset_name": (
+                        "clean_orders"
+                    ),
+                    "user_question": (
+                        "Private transformation "
+                        "request."
+                    ),
+                },
+            ),
+            AIMessage(
+                content="Completed."
+            ),
+        ]
+    )
+
+    monkeypatch.setattr(
+        etl_module,
+        "etl_llm_with_tools",
+        fake_llm,
+    )
+
+    fake_tool = FakeTool(
+        name=(
+            "dbt_bronze_to_silver_tool"
+        ),
+        calls=calls,
+        result=(
+            etl_module._DBTToolResult(
+                content=(
+                    report.content
+                ),
+                report=report,
+            )
+        ),
+    )
+
+    monkeypatch.setattr(
+        etl_module,
+        "tools_by_name",
+        {
+            "dbt_bronze_to_silver_tool": (
+                fake_tool
+            )
+        },
+    )
+
+    result = (
+        etl_module.etl_analyst
+        .invoke(
+            {
+                "messages": [
+                    HumanMessage(
+                        content=(
+                            "Build Silver "
+                            "using dbt."
+                        )
+                    )
+                ]
+            }
+        )
+    )
+
+    execution = (
+        isolated_execution_store
+        .get_run(
+            result["run_id"]
+        )
+    )
+
+    event = (
+        execution["events"][0]
+    )
+
+    dbt = (
+        event["metadata"][
+            "dbt"
+        ]
+    )
+
+    assert (
+        dbt["model"]
+        == "stg_orders"
+    )
+
+    assert (
+        dbt["target_status"]
+        == "success"
+    )
+
+    assert (
+        dbt["relation"][
+            "schema"
+        ]
+        == "dbt_test_silver"
+    )
+
+    assert (
+        dbt["lineage_event_id"]
+        == "lineage-event-123"
+    )
+
+    assert (
+        "Private transformation request."
+        not in str(execution)
     )

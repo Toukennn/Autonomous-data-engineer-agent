@@ -1,47 +1,53 @@
-from langchain.tools import tool
-from langchain_core.messages import (
-    AIMessage,
-    ToolMessage,
-)
-from langgraph.graph import END, START, StateGraph
-
-from models.schema import (
-    DBTTransformPlan,
-    ETLAgentSchema,
-    TransformPlan,
-)
-
-from utils.etl_tools import ETLTools
-from utils.llm_pick import pick_llm
-
-from utils.data_layers import DataLayer
-
-from config.settings import (
-    get_runtime_settings,
-)
-
 import logging
-
+from dataclasses import dataclass
 from datetime import (
     datetime,
     timezone,
 )
 from time import perf_counter
+from typing import Literal
 from uuid import uuid4
 
-from utils.execution_observability import (
-    ExecutionRunStore,
+from langchain.tools import tool
+from langchain_core.messages import (
+    AIMessage,
+    ToolMessage,
+)
+from langgraph.graph import (
+    END,
+    START,
+    StateGraph,
 )
 
-from typing import Literal
-
+from config.settings import (
+    get_runtime_settings,
+)
 from models.data_quality import (
     DataQualityContract,
 )
-
+from models.schema import (
+    DBTTransformPlan,
+    ETLAgentSchema,
+    TransformPlan,
+)
+from utils.data_layers import (
+    DataLayer,
+)
+from utils.etl_tools import (
+    DBTDatasetBuildReport,
+    ETLTools,
+)
 from utils.exceptions import (
+    DBTExecutionError,
     DataQualityError,
 )
+from utils.execution_observability import (
+    ExecutionRunStore,
+)
+from utils.llm_pick import (
+    pick_llm,
+)
+
 
 runtime_settings = (
     get_runtime_settings()
@@ -61,6 +67,11 @@ execution_store = (
 logger = logging.getLogger(
     __name__
 )
+
+
+# ============================================================
+# TRANSFORMATION PLANNERS
+# ============================================================
 
 
 def create_transform_plan(
@@ -117,8 +128,10 @@ Rules:
 - The summary must briefly explain the transformation.
 """
 
-    return planner_llm.invoke(
-        prompt
+    return (
+        planner_llm.invoke(
+            prompt
+        )
     )
 
 
@@ -294,8 +307,6 @@ Rules:
         )
     )
 
-    # Contract identity is application-controlled.
-    # The planner controls only the requested rules.
     return DataQualityContract(
         contract_version=1,
         name=(
@@ -305,7 +316,11 @@ Rules:
     )
 
 
-# A safe metadata helper
+# ============================================================
+# SAFE OBSERVABILITY METADATA
+# ============================================================
+
+
 def _safe_tool_metadata(
     tool_name: str,
     args: dict,
@@ -362,7 +377,198 @@ def _safe_tool_metadata(
     }
 
 
+# ============================================================
+# DBT OBSERVABILITY RESULT
+# ============================================================
 
+
+@dataclass(
+    frozen=True
+)
+class _DBTToolResult:
+    """
+    Internal dbt-tool result.
+
+    content:
+        Safe text returned to the LLM.
+
+    report:
+        Structured deterministic dbt execution
+        information used only by application
+        observability.
+
+    The structured report is never directly
+    exposed to the LLM.
+    """
+
+    content: str
+    report: DBTDatasetBuildReport
+
+
+def _safe_dbt_success_metadata(
+    report: DBTDatasetBuildReport,
+) -> dict:
+    """
+    Extract a compact and safe dbt execution summary.
+
+    Deliberately excludes:
+
+    - compiled SQL
+    - raw dbt output
+    - credentials
+    - filesystem paths
+    - user prompts
+    - adapter responses
+    """
+
+    build_result = (
+        report.build_result
+    )
+
+    artifact = (
+        build_result.artifact
+    )
+
+    status_counts: dict[
+        str,
+        int,
+    ] = {}
+
+    for test in artifact.tests:
+
+        status_counts[
+            test.status
+        ] = (
+            status_counts.get(
+                test.status,
+                0,
+            )
+            + 1
+        )
+
+    direct_target_tests = sum(
+        1
+        for test
+        in artifact.tests
+        if (
+            test
+            .directly_tests_target
+        )
+    )
+
+    metadata = {
+        "invocation_id": (
+            artifact.invocation_id
+        ),
+        "model": (
+            build_result.model_name
+        ),
+        "model_unique_id": (
+            artifact
+            .target_model_unique_id
+        ),
+        "relation": {
+            "schema": (
+                artifact
+                .relation_schema
+            ),
+            "name": (
+                artifact
+                .relation_name
+            ),
+        },
+        "target_status": (
+            artifact.target_status
+        ),
+        "target_execution_time_seconds": (
+            artifact
+            .target_execution_time_seconds
+        ),
+        "total_elapsed_time_seconds": (
+            artifact
+            .elapsed_time_seconds
+        ),
+        "executed_model_count": len(
+            artifact
+            .executed_model_unique_ids
+        ),
+        "tests": {
+            "total": len(
+                artifact.tests
+            ),
+            "direct_target": (
+                direct_target_tests
+            ),
+            "status_counts": dict(
+                sorted(
+                    status_counts.items()
+                )
+            ),
+        },
+        "lineage_event_id": (
+            report
+            .lineage_event_id
+        ),
+        "plan_fingerprint": (
+            report
+            .plan_fingerprint
+        ),
+        "quality_contract_configured": (
+            report
+            .quality_contract_configured
+        ),
+        "quality_contract_fingerprint": (
+            report
+            .quality_contract_fingerprint
+        ),
+    }
+
+    return {
+        key: value
+        for key, value
+        in metadata.items()
+        if value is not None
+    }
+
+
+def _safe_dbt_failure_metadata(
+    exc: DBTExecutionError,
+) -> dict:
+    """
+    Extract only explicitly approved dbt failure
+    metadata from DBTExecutionError.
+
+    The raw details dictionary is intentionally
+    not persisted.
+    """
+
+    details = (
+        exc.details
+        if isinstance(
+            exc.details,
+            dict,
+        )
+        else {}
+    )
+
+    allowed_fields = {
+        "layer",
+        "dataset",
+        "model",
+        "failure_kind",
+        "exception_type",
+        "target_status",
+    }
+
+    return {
+        key: details[key]
+        for key in allowed_fields
+        if (
+            key in details
+            and details[key]
+            is not None
+        )
+    }
 
 
 def _safe_quality_failure_metadata(
@@ -445,10 +651,19 @@ def _safe_quality_failure_metadata(
     }
 
 
-# we do not want an observability write failure to invalidate a successfully executed ETL operation.
+# ============================================================
+# OBSERVABILITY PERSISTENCE
+# ============================================================
+
+
 def _record_event_safely(
     **kwargs,
 ) -> None:
+    """
+    Observability persistence must never invalidate
+    a successfully executed ETL operation.
+    """
+
     try:
         execution_store.record_event(
             **kwargs
@@ -468,6 +683,10 @@ def _complete_run_safely(
     status: str,
     failure_reason: str | None = None,
 ) -> None:
+    """
+    Safely finalize one ETL execution record.
+    """
+
     try:
         execution_store.complete_run(
             run_id=run_id,
@@ -488,6 +707,7 @@ def _complete_run_safely(
 # ============================================================
 # TOOLS
 # ============================================================
+
 
 @tool
 def extract_load_tool(
@@ -519,109 +739,48 @@ def extract_load_tool(
         watermark_param=None
         watermark_field=None
 
-    For incremental ingestion, all three values are required:
+    For incremental ingestion, all three values are required.
 
-        state_key:
-            Stable identifier for the ingestion pipeline.
-
-        watermark_param:
-            API query parameter used to request only newer records.
-
-            Example:
-                updated_after
-                after_id
-                modified_since
-
-        watermark_field:
-            Field inside each returned record whose maximum value
-            becomes the next checkpoint.
-
-            Example:
-                id
-                updated_at
-                modified_at
-
-    The actual previous watermark value is loaded internally from
-    the checkpoint store and must never be supplied by the LLM.
+    The actual previous watermark value is loaded internally
+    from the checkpoint store and must never be supplied by
+    the LLM.
 
     Important:
 
     - Never invent watermark parameters or fields.
-    - Use incremental ingestion only when the API contract or user
-      explicitly identifies the correct incremental parameter and field.
-    - Never expose, request, or pass checkpoint cursor values manually.
+    - Use incremental ingestion only when the API contract
+      or user explicitly identifies the correct incremental
+      parameter and field.
+    - Never expose checkpoint cursor values manually.
     - Never expose API credentials.
 
-    Args:
-        url:
-            API endpoint.
-
-        dataset_name: 
-            Logical name of the Bronze dataset.
-
-            This is not a filesystem path. 
-
-            Example: 
-                orders
-                customers 
-                pokemon
-
-        format:
-            csv, json, or parquet.
-
-        paginate:
-            Whether pagination should be followed automatically.
-
-        records_path:
-            Dotted path containing API records.
-
-        next_path:
-            Dotted path containing the next-page URL.
-
-        use_auth:
-            Whether configured API authentication should be used.
-
-        state_key:
-            Stable checkpoint identifier used for incremental ingestion.
-
-        watermark_param:
-            API query parameter representing the previous watermark.
-
-        watermark_field:
-            Record field used to calculate the next watermark.
-    
     Breaking schema-evolution rules:
 
-        - Breaking API schema changes are rejected by deterministic code.
-
-        - Do not attempt to bypass a rejected schema change by changing the
-        state_key, watermark configuration, or output path.
-
-        - If a schema rejection report is returned by the extraction tool,
-        explain the detected schema change to the user and report the
-        rejection-report location.
-
-        - Never claim that a rejected schema change was successfully applied.
-
-        - The schema-evolution policy is application-controlled.
-        Do not attempt to override it.
-
-    Returns:
-        Description of the extraction and saved files.
+    - Breaking API schema changes are rejected by
+      deterministic code.
+    - Never bypass a rejected schema transition.
+    - Never claim a rejected schema change succeeded.
     """
+
     etl_tools = ETLTools()
 
-    return etl_tools.extract_load(
-        url=url,
-        dataset_name=dataset_name,
-        format=format,
-        paginate=paginate,
-        records_path=records_path,
-        next_path=next_path,
-        use_auth=use_auth,
-        state_key=state_key,
-        watermark_param=watermark_param,
-        watermark_field=watermark_field,
+    return (
+        etl_tools.extract_load(
+            url=url,
+            dataset_name=dataset_name,
+            format=format,
+            paginate=paginate,
+            records_path=records_path,
+            next_path=next_path,
+            use_auth=use_auth,
+            state_key=state_key,
+            watermark_param=(
+                watermark_param
+            ),
+            watermark_field=(
+                watermark_field
+            ),
+        )
     )
 
 
@@ -633,42 +792,37 @@ def bronze_to_silver_tool(
     output_format: str = "csv",
 ) -> str:
     """
-    Transform a Bronze dataset into a cleaned and standardized
-    Silver dataset.
+    Transform a Bronze dataset into a cleaned and
+    standardized Silver dataset.
 
-    Dataset names are logical identifiers, not filesystem paths.
+    Dataset names are logical identifiers,
+    not filesystem paths.
 
-    The transformation request is converted by the planner LLM
-    into a validated TransformPlan. Trusted deterministic code
-    executes the plan.
-
-    Args:
-        source_dataset_name:
-            Existing Bronze dataset name.
-
-        user_question:
-            Transformation requested by the user.
-
-        target_dataset_name:
-            Optional Silver dataset name. If omitted, the source
-            dataset name is reused.
-
-        output_format:
-            csv, json, or parquet.
+    The transformation request is converted by the
+    planner LLM into a validated TransformPlan.
     """
 
     etl_tools = ETLTools()
 
     dataset_context = (
-        etl_tools.get_layer_dataset_context(
+        etl_tools
+        .get_layer_dataset_context(
             layer=DataLayer.BRONZE,
-            dataset_name=source_dataset_name,
+            dataset_name=(
+                source_dataset_name
+            ),
         )
     )
 
-    plan = create_transform_plan(
-        user_question=user_question,
-        dataset_context=dataset_context,
+    plan = (
+        create_transform_plan(
+            user_question=(
+                user_question
+            ),
+            dataset_context=(
+                dataset_context
+            ),
+        )
     )
 
     return (
@@ -696,39 +850,35 @@ def silver_to_gold_tool(
     output_format: str = "csv",
 ) -> str:
     """
-    Curate a Silver dataset into an analytics-ready Gold dataset.
+    Curate a Silver dataset into an analytics-ready
+    Gold dataset.
 
-    Use this for business-oriented filtering, aggregation,
-    KPI preparation, reporting tables, and curated outputs.
-
-    Dataset names are logical identifiers, not filesystem paths.
-
-    Args:
-        source_dataset_name:
-            Existing Silver dataset name.
-
-        user_question:
-            Curation or analytical transformation requested.
-
-        target_dataset_name:
-            Optional Gold dataset name.
-
-        output_format:
-            csv, json, or parquet.
+    Use this for business-oriented filtering,
+    aggregation, KPI preparation, reporting tables,
+    and curated outputs.
     """
 
     etl_tools = ETLTools()
 
     dataset_context = (
-        etl_tools.get_layer_dataset_context(
+        etl_tools
+        .get_layer_dataset_context(
             layer=DataLayer.SILVER,
-            dataset_name=source_dataset_name,
+            dataset_name=(
+                source_dataset_name
+            ),
         )
     )
 
-    plan = create_transform_plan(
-        user_question=user_question,
-        dataset_context=dataset_context,
+    plan = (
+        create_transform_plan(
+            user_question=(
+                user_question
+            ),
+            dataset_context=(
+                dataset_context
+            ),
+        )
     )
 
     return (
@@ -764,37 +914,7 @@ def configure_quality_contract_tool(
     Use this only when the user explicitly specifies
     quality expectations.
 
-    Examples include:
-
-    - order_id must not be null
-    - order_id must be unique
-    - amount must be >= 0
-    - status must be one of paid, pending, cancelled
-    - the dataset must contain at least 1 row
-
-    This tool may create a new contract but may not
-    overwrite a different existing contract.
-
-    Args:
-        layer:
-            Target Medallion layer.
-            Must be "silver" or "gold".
-
-        dataset_name:
-            Logical target dataset name.
-            This is not a filesystem path.
-
-        user_question:
-            The user's explicit quality requirements.
-
-    Important:
-
-    - Never invent quality rules.
-    - Never create a quality contract unless the user
-      requested data-quality expectations.
-    - Never use this tool to bypass a failed quality gate.
-    - Never attempt to weaken or overwrite an existing
-      quality contract.
+    Never invent or weaken quality requirements.
     """
 
     target_layer = (
@@ -833,7 +953,7 @@ def dbt_bronze_to_silver_tool(
     source_dataset_name: str,
     user_question: str,
     target_dataset_name: str | None = None,
-) -> str:
+) -> _DBTToolResult:
     """
     Create and execute a warehouse-backed Silver dbt
     model from a Bronze logical dataset.
@@ -843,23 +963,14 @@ def dbt_bronze_to_silver_tool(
     1. synchronizes Bronze into PostgreSQL
     2. exposes safe Bronze metadata to the planner
     3. obtains a validated DBTTransformPlan
-    4. compiles the plan into application-controlled SQL
+    4. deterministically compiles the plan
     5. creates the Silver dbt model
     6. synchronizes its quality contract
     7. runs the bounded dbt build
+    8. returns safe execution metadata internally
 
-    The LLM never supplies SQL, selectors, dbt commands,
-    paths, profiles, or credentials.
-
-    Args:
-        source_dataset_name:
-            Existing Bronze logical dataset.
-
-        user_question:
-            User-requested Silver transformation.
-
-        target_dataset_name:
-            Optional logical Silver dataset name.
+    The LLM never supplies SQL, selectors,
+    dbt commands, paths, profiles, or credentials.
     """
 
     etl_tools = ETLTools()
@@ -871,9 +982,9 @@ def dbt_bronze_to_silver_tool(
         else source_dataset_name
     )
 
-    # ============================================================
+    # ========================================================
     # BRONZE -> POSTGRESQL
-    # ============================================================
+    # ========================================================
 
     warehouse_result = (
         etl_tools
@@ -884,9 +995,9 @@ def dbt_bronze_to_silver_tool(
         )
     )
 
-    # ============================================================
+    # ========================================================
     # PLANNER CONTEXT
-    # ============================================================
+    # ========================================================
 
     dataset_context = (
         etl_tools
@@ -898,9 +1009,9 @@ def dbt_bronze_to_silver_tool(
         )
     )
 
-    # ============================================================
+    # ========================================================
     # LLM DECIDES WHAT
-    # ============================================================
+    # ========================================================
 
     plan = (
         create_dbt_transform_plan(
@@ -914,9 +1025,9 @@ def dbt_bronze_to_silver_tool(
         )
     )
 
-    # ============================================================
+    # ========================================================
     # DETERMINISTIC MODEL GENERATION
-    # ============================================================
+    # ========================================================
 
     model_result = (
         etl_tools
@@ -931,11 +1042,11 @@ def dbt_bronze_to_silver_tool(
         )
     )
 
-    # ============================================================
+    # ========================================================
     # BOUNDED DBT EXECUTION
-    # ============================================================
+    # ========================================================
 
-    build_result = (
+    build_report = (
         etl_tools
         .build_dbt_dataset(
             layer=DataLayer.SILVER,
@@ -945,10 +1056,15 @@ def dbt_bronze_to_silver_tool(
         )
     )
 
-    return (
-        f"{warehouse_result}\n\n"
-        f"{model_result}\n\n"
-        f"{build_result}"
+    return _DBTToolResult(
+        content=(
+            f"{warehouse_result}\n\n"
+            f"{model_result}\n\n"
+            f"{build_report.content}"
+        ),
+        report=(
+            build_report
+        ),
     )
 
 
@@ -957,7 +1073,7 @@ def dbt_silver_to_gold_tool(
     source_dataset_name: str,
     user_question: str,
     target_dataset_name: str | None = None,
-) -> str:
+) -> _DBTToolResult:
     """
     Create and execute a warehouse-backed Gold dbt
     model from an existing Silver dbt dataset.
@@ -965,8 +1081,9 @@ def dbt_silver_to_gold_tool(
     The LLM produces only a DBTTransformPlan.
 
     Application-controlled code owns:
+
     - Silver model resolution
-    - input/output schemas
+    - schemas
     - SQL compilation
     - ref() dependencies
     - model files
@@ -984,9 +1101,9 @@ def dbt_silver_to_gold_tool(
         else source_dataset_name
     )
 
-    # ============================================================
-    # PLANNER CONTEXT FROM ACTUAL SILVER OUTPUT
-    # ============================================================
+    # ========================================================
+    # PLANNER CONTEXT
+    # ========================================================
 
     dataset_context = (
         etl_tools
@@ -997,6 +1114,10 @@ def dbt_silver_to_gold_tool(
             ),
         )
     )
+
+    # ========================================================
+    # LLM DECIDES WHAT
+    # ========================================================
 
     plan = (
         create_dbt_transform_plan(
@@ -1009,6 +1130,10 @@ def dbt_silver_to_gold_tool(
             target_layer="gold",
         )
     )
+
+    # ========================================================
+    # DETERMINISTIC MODEL GENERATION
+    # ========================================================
 
     model_result = (
         etl_tools
@@ -1023,7 +1148,11 @@ def dbt_silver_to_gold_tool(
         )
     )
 
-    build_result = (
+    # ========================================================
+    # BOUNDED DBT EXECUTION
+    # ========================================================
+
+    build_report = (
         etl_tools
         .build_dbt_dataset(
             layer=DataLayer.GOLD,
@@ -1033,14 +1162,21 @@ def dbt_silver_to_gold_tool(
         )
     )
 
-    return (
-        f"{model_result}\n\n"
-        f"{build_result}"
+    return _DBTToolResult(
+        content=(
+            f"{model_result}\n\n"
+            f"{build_report.content}"
+        ),
+        report=(
+            build_report
+        ),
     )
+
 
 # ============================================================
 # TOOLKIT
 # ============================================================
+
 
 tools = [
     extract_load_tool,
@@ -1061,10 +1197,17 @@ tools_by_name = {
 # LLM
 # ============================================================
 
-etl_llm = pick_llm("claude")
 
-etl_llm_with_tools = etl_llm.bind_tools(
-    tools
+etl_llm = (
+    pick_llm(
+        "claude"
+    )
+)
+
+etl_llm_with_tools = (
+    etl_llm.bind_tools(
+        tools
+    )
 )
 
 
@@ -1072,12 +1215,13 @@ etl_llm_with_tools = etl_llm.bind_tools(
 # GRAPH NODES
 # ============================================================
 
+
 def initialize_run_node(
     state: ETLAgentSchema,
 ):
     """
-    Initialize structured observability for
-    one ETL-agent invocation.
+    Initialize structured observability for one
+    ETL-agent invocation.
     """
 
     if state.run_id:
@@ -1107,7 +1251,9 @@ def initialize_run_node(
     }
 
 
-def llm_node(state: ETLAgentSchema):
+def llm_node(
+    state: ETLAgentSchema,
+):
     """
     Ask the ETL agent what action should be taken next.
 
@@ -1157,7 +1303,7 @@ def llm_node(state: ETLAgentSchema):
 
     - Never invent filesystem paths.
     - Never provide "data/", "bronze/", "silver/", or "gold/"
-    as part of a dataset name.
+      as part of a dataset name.
     - Dataset names are logical identifiers only.
     - API extraction always writes to Bronze.
     - Silver must be created from Bronze.
@@ -1171,12 +1317,12 @@ def llm_node(state: ETLAgentSchema):
     Data-quality rules:
 
     - Never invent a quality contract unless the user explicitly
-    requests quality requirements.
+      requests quality requirements.
     - Never invent quality constraints.
     - Quality contracts apply to target Silver or Gold datasets.
     - If a user requests quality constraints for a dataset that is
-    about to be created, configure the contract BEFORE creating
-    that dataset so the first candidate is gated.
+      about to be created, configure the contract BEFORE creating
+      that dataset so the first candidate is gated.
     - Never attempt to overwrite or weaken an existing contract.
     - Never bypass a failed quality gate.
     - There is no skip-quality-check mechanism.
@@ -1253,15 +1399,16 @@ def llm_node(state: ETLAgentSchema):
         *state.messages,
     ]
 
-    response = etl_llm_with_tools.invoke(
-        conversation
+    response = (
+        etl_llm_with_tools.invoke(
+            conversation
+        )
     )
 
-    # Important:
-    # Because ETLAgentSchema uses LangGraph's add_messages reducer,
-    # we return ONLY the new message.
     return {
-        "messages": [response]
+        "messages": [
+            response
+        ]
     }
 
 
@@ -1289,9 +1436,9 @@ def tool_node(
         [],
     )
 
-    # ============================================================
+    # ========================================================
     # DEFENSIVE CHECK
-    # ============================================================
+    # ========================================================
 
     if not tool_calls:
         return {
@@ -1302,11 +1449,13 @@ def tool_node(
             ),
         }
 
-    # ============================================================
+    # ========================================================
     # ONE DEPENDENT TOOL PER TURN
-    # ============================================================
+    # ========================================================
 
-    if len(tool_calls) != 1:
+    if len(
+        tool_calls
+    ) != 1:
 
         reason = (
             "ETL orchestration requires exactly "
@@ -1318,32 +1467,39 @@ def tool_node(
         tool_messages = [
             ToolMessage(
                 content=(
-                    f"Tool execution rejected: "
+                    "Tool execution rejected: "
                     f"{reason}"
                 ),
                 tool_call_id=(
                     tool_call["id"]
                 ),
             )
-            for tool_call in tool_calls
+            for tool_call
+            in tool_calls
         ]
 
         return {
-            "messages": tool_messages,
+            "messages": (
+                tool_messages
+            ),
             "workflow_failed": True,
-            "failure_reason": reason,
+            "failure_reason": (
+                reason
+            ),
         }
 
-    tool_call = tool_calls[0]
+    tool_call = (
+        tool_calls[0]
+    )
 
     next_count = (
         state.tool_call_count
         + 1
     )
 
-    # ============================================================
+    # ========================================================
     # TOOL-CALL BUDGET
-    # ============================================================
+    # ========================================================
 
     if (
         next_count
@@ -1372,16 +1528,18 @@ def tool_node(
                 next_count
             ),
             "workflow_failed": True,
-            "failure_reason": reason,
+            "failure_reason": (
+                reason
+            ),
         }
 
     tool_name = (
         tool_call["name"]
     )
 
-    # ============================================================
+    # ========================================================
     # TOOL ALLOWLIST
-    # ============================================================
+    # ========================================================
 
     if (
         tool_name
@@ -1390,13 +1548,16 @@ def tool_node(
 
         reason = (
             "Unknown or unauthorized ETL "
-            f"tool requested: {tool_name}"
+            f"tool requested: "
+            f"{tool_name}"
         )
 
         return {
             "messages": [
                 ToolMessage(
-                    content=reason,
+                    content=(
+                        reason
+                    ),
                     tool_call_id=(
                         tool_call["id"]
                     ),
@@ -1406,7 +1567,9 @@ def tool_node(
                 next_count
             ),
             "workflow_failed": True,
-            "failure_reason": reason,
+            "failure_reason": (
+                reason
+            ),
         }
 
     selected_tool = (
@@ -1415,9 +1578,9 @@ def tool_node(
         ]
     )
 
-    # ============================================================
+    # ========================================================
     # EXECUTION
-    # ============================================================
+    # ========================================================
 
     started_at = (
         datetime.now(
@@ -1458,7 +1621,9 @@ def tool_node(
                 tool_call["args"],
             ),
             "error_type": (
-                type(exc).__name__
+                type(
+                    exc
+                ).__name__
             ),
         }
 
@@ -1474,14 +1639,37 @@ def tool_node(
                 )
             )
 
+        if isinstance(
+            exc,
+            DBTExecutionError,
+        ):
+            dbt_failure = (
+                _safe_dbt_failure_metadata(
+                    exc
+                )
+            )
+
+            if dbt_failure:
+                failure_metadata[
+                    "dbt"
+                ] = (
+                    dbt_failure
+                )
+
         _record_event_safely(
             run_id=state.run_id,
             event_type="tool",
             name=tool_name,
             status="failed",
-            started_at=started_at,
-            completed_at=completed_at,
-            duration_ms=duration_ms,
+            started_at=(
+                started_at
+            ),
+            completed_at=(
+                completed_at
+            ),
+            duration_ms=(
+                duration_ms
+            ),
             metadata=(
                 failure_metadata
             ),
@@ -1510,13 +1698,14 @@ def tool_node(
                 next_count
             ),
             "workflow_failed": True,
-            "failure_reason": reason,
+            "failure_reason": (
+                reason
+            ),
         }
 
-
-    # ============================================================
+    # ========================================================
     # SUCCESS OBSERVABILITY
-    # ============================================================
+    # ========================================================
 
     completed_at = (
         datetime.now(
@@ -1532,32 +1721,61 @@ def tool_node(
         * 1000
     )
 
+    success_metadata = (
+        _safe_tool_metadata(
+            tool_name,
+            tool_call["args"],
+        )
+    )
+
+    tool_content = str(
+        result
+    )
+
+    if isinstance(
+        result,
+        _DBTToolResult,
+    ):
+        tool_content = (
+            result.content
+        )
+
+        success_metadata[
+            "dbt"
+        ] = (
+            _safe_dbt_success_metadata(
+                result.report
+            )
+        )
+
     _record_event_safely(
         run_id=state.run_id,
         event_type="tool",
         name=tool_name,
         status="success",
-        started_at=started_at,
-        completed_at=completed_at,
-        duration_ms=duration_ms,
+        started_at=(
+            started_at
+        ),
+        completed_at=(
+            completed_at
+        ),
+        duration_ms=(
+            duration_ms
+        ),
         metadata=(
-            _safe_tool_metadata(
-                tool_name,
-                tool_call["args"],
-            )
+            success_metadata
         ),
     )
 
-
-    # ============================================================
+    # ========================================================
     # SUCCESS
-    # ============================================================
+    # ========================================================
 
     return {
         "messages": [
             ToolMessage(
-                content=str(
-                    result
+                content=(
+                    tool_content
                 ),
                 tool_call_id=(
                     tool_call["id"]
@@ -1571,6 +1789,7 @@ def tool_node(
         "failure_reason": "",
     }
 
+
 def failure_node(
     state: ETLAgentSchema,
 ):
@@ -1583,7 +1802,10 @@ def failure_node(
 
     reason = (
         state.failure_reason
-        or "Unknown ETL workflow failure."
+        or (
+            "Unknown ETL workflow "
+            "failure."
+        )
     )
 
     _complete_run_safely(
@@ -1624,9 +1846,11 @@ def complete_run_node(
 
     return {}
 
+
 # ============================================================
 # ROUTING
 # ============================================================
+
 
 def route_after_tools(
     state: ETLAgentSchema,
@@ -1649,7 +1873,9 @@ def route_after_llm(
     or finish the workflow.
     """
 
-    last_message = state.messages[-1]
+    last_message = (
+        state.messages[-1]
+    )
 
     tool_calls = getattr(
         last_message,
@@ -1663,10 +1889,10 @@ def route_after_llm(
     return "complete"
 
 
-
 # ============================================================
 # GRAPH
 # ============================================================
+
 
 etl_graph = StateGraph(
     ETLAgentSchema
@@ -1702,6 +1928,7 @@ etl_graph.add_node(
 # ENTRY
 # ============================================================
 
+
 etl_graph.add_edge(
     START,
     "initialize",
@@ -1717,6 +1944,7 @@ etl_graph.add_edge(
 # AFTER LLM
 # ============================================================
 
+
 etl_graph.add_conditional_edges(
     "llm",
     route_after_llm,
@@ -1731,6 +1959,7 @@ etl_graph.add_conditional_edges(
 # AFTER TOOL EXECUTION
 # ============================================================
 
+
 etl_graph.add_conditional_edges(
     "tools",
     route_after_tools,
@@ -1744,6 +1973,7 @@ etl_graph.add_conditional_edges(
 # ============================================================
 # TERMINAL NODES
 # ============================================================
+
 
 etl_graph.add_edge(
     "complete",
@@ -1760,6 +1990,7 @@ etl_graph.add_edge(
 # COMPILE
 # ============================================================
 
+
 etl_analyst = (
     etl_graph.compile()
 )
@@ -1769,9 +2000,12 @@ etl_analyst = (
 # LOCAL TESTING
 # ============================================================
 
+
 if __name__ == "__main__":
 
-    from langchain_core.messages import HumanMessage
+    from langchain_core.messages import (
+        HumanMessage,
+    )
 
     test_input = {
         "messages": [
@@ -1785,12 +2019,18 @@ if __name__ == "__main__":
         ]
     }
 
-    result = etl_analyst.invoke(
-        test_input
+    result = (
+        etl_analyst.invoke(
+            test_input
+        )
     )
 
-    print("\n--- Final ETL Agent Response ---\n")
+    print(
+        "\n--- Final ETL Agent Response ---\n"
+    )
 
     print(
-        result["messages"][-1].content
+        result[
+            "messages"
+        ][-1].content
     )
