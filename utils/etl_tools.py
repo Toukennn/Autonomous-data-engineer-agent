@@ -680,7 +680,7 @@ class ETLTools:
             only after that successful database commit.
 
             A retry is safe because the warehouse load
-            uses deterministic table replacement.
+            uses deterministic in-place table refresh.
         """
 
         safe_dataset_name = (
@@ -819,7 +819,7 @@ class ETLTools:
             "warehouse_table": (
                 result.table
             ),
-            "load_mode": "replace",
+            "load_mode": "refresh_in_place",
             "rows_loaded": (
                 result.row_count
             ),

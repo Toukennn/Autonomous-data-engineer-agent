@@ -45,7 +45,7 @@ def _write_sync_metadata(
             warehouse_schema
         ),
         "warehouse_table": dataset,
-        "load_mode": "replace",
+        "load_mode": "refresh_in_place",
         "rows_loaded": 2,
         "columns_loaded": 1,
         "columns": [

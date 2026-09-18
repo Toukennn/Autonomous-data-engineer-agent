@@ -137,3 +137,12 @@ class LLMConfigurationError(ConfigurationError):
     """
     Required LLM provider configuration is missing.
     """
+
+
+class DBTArtifactError(
+    ETLError
+):
+    """
+    dbt execution artifacts are missing,
+    malformed, or inconsistent.
+    """

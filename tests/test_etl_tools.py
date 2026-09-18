@@ -3250,7 +3250,7 @@ def test_bronze_dataset_loads_to_warehouse(
         metadata[
             "load_mode"
         ]
-        == "replace"
+        == "refresh_in_place"
     )
 
     assert (

@@ -426,7 +426,7 @@ def test_lineage_records_warehouse_sync(
         event["metadata"][
             "load_mode"
         ]
-        == "replace"
+        == "refresh_in_place"
     )
 
     assert (

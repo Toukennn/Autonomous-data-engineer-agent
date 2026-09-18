@@ -388,7 +388,7 @@ class LineageStore:
                 ),
             },
             metadata={
-                "load_mode": "replace",
+                "load_mode": "refresh_in_place",
                 "row_count": (
                     row_count
                 ),
