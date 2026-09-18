@@ -4432,6 +4432,48 @@ class ETLTools:
             )
         )
 
+        source_layer = (
+            DataLayer.BRONZE
+            if (
+                layer
+                == DataLayer.SILVER
+            )
+            else DataLayer.SILVER
+        )
+
+        lineage_event_id = (
+            self.lineage_store
+            .record_dbt_build(
+                source_layer=(
+                    source_layer
+                ),
+                source_dataset=(
+                    model_metadata
+                    .source_dataset_name
+                ),
+                target_layer=(
+                    layer
+                ),
+                target_dataset=(
+                    safe_dataset_name
+                ),
+                model_name=(
+                    result.model_name
+                ),
+                plan_fingerprint=(
+                    model_metadata
+                    .plan_fingerprint
+                ),
+                quality_contract_fingerprint=(
+                    quality_sync
+                    .contract_fingerprint
+                ),
+                artifact=(
+                    result.artifact
+                ),
+            )
+        )
+
         quality_status = (
             "configured"
             if (
@@ -4446,6 +4488,13 @@ class ETLTools:
             f"Layer: {layer.value}\n"
             f"Dataset: {safe_dataset_name}\n"
             f"Model: {result.model_name}\n"
+            f"dbt invocation: "
+            f"{result.artifact.invocation_id}\n"
+            f"Warehouse relation: "
+            f"{result.artifact.relation_schema}."
+            f"{result.artifact.relation_name}\n"
             f"Quality contract: "
-            f"{quality_status}"
+            f"{quality_status}\n"
+            f"Lineage event: "
+            f"{lineage_event_id}"
         )

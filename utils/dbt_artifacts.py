@@ -10,6 +10,7 @@ from utils.exceptions import (
     DBTArtifactError,
 )
 
+import math
 
 @dataclass(
     frozen=True
@@ -273,6 +274,9 @@ class DBTArtifactReader:
                     int,
                     float,
                 ),
+            )
+            or not math.isfinite(
+                value
             )
             or value < 0
         ):

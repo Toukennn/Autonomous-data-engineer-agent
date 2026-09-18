@@ -7,6 +7,10 @@ from uuid import uuid4
 from utils.data_layers import DataLayer
 from utils.exceptions import DatasetError
 
+from utils.dbt_artifacts import (
+    DBTBuildArtifactSummary,
+)
+
 
 def payload_fingerprint(
     payload: object,
@@ -55,6 +59,7 @@ class LineageStore:
         "transform",
         "curate",
         "warehouse_sync",
+        "dbt_build",
     }
 
     def __init__(
@@ -602,4 +607,182 @@ class LineageStore:
 
         return list(
             document["events"]
+        )
+
+    def record_dbt_build(
+        self,
+        *,
+        source_layer: DataLayer,
+        source_dataset: str,
+        target_layer: DataLayer,
+        target_dataset: str,
+        model_name: str,
+        plan_fingerprint: str,
+        quality_contract_fingerprint: (
+            str | None
+        ),
+        artifact: DBTBuildArtifactSummary,
+    ) -> str:
+        """
+        Record one successful, artifact-verified
+        dbt model build.
+
+        No compiled SQL, raw dbt messages,
+        credentials, or adapter responses are
+        persisted.
+        """
+
+        if target_layer not in {
+            DataLayer.SILVER,
+            DataLayer.GOLD,
+        }:
+            raise DatasetError(
+                "dbt lineage supports "
+                "Silver and Gold only."
+            )
+
+        expected_source_layer = (
+            DataLayer.BRONZE
+            if (
+                target_layer
+                == DataLayer.SILVER
+            )
+            else DataLayer.SILVER
+        )
+
+        if (
+            source_layer
+            != expected_source_layer
+        ):
+            raise DatasetError(
+                "Invalid dbt lineage "
+                "source layer."
+            )
+
+        if (
+            artifact.target_status
+            != "success"
+        ):
+            raise DatasetError(
+                "Successful dbt lineage cannot "
+                "be written for a failed model."
+            )
+
+        if (
+            artifact.target_model_name
+            != model_name
+        ):
+            raise DatasetError(
+                "dbt lineage model identity "
+                "does not match the artifact."
+            )
+
+        if (
+            artifact.relation_name
+            != model_name
+        ):
+            raise DatasetError(
+                "dbt lineage relation identity "
+                "does not match the model."
+            )
+
+        tests = [
+            {
+                "unique_id": (
+                    test.unique_id
+                ),
+                "name": (
+                    test.name
+                ),
+                "status": (
+                    test.status
+                ),
+                "execution_time_seconds": (
+                    test
+                    .execution_time_seconds
+                ),
+                "failures": (
+                    test.failures
+                ),
+                "directly_tests_target": (
+                    test
+                    .directly_tests_target
+                ),
+            }
+            for test
+            in artifact.tests
+        ]
+
+        return self._append_event(
+            operation="dbt_build",
+            source={
+                "type": "dataset",
+                "layer": (
+                    source_layer.value
+                ),
+                "dataset": (
+                    source_dataset
+                ),
+            },
+            target={
+                "type": "dbt_model",
+                "layer": (
+                    target_layer.value
+                ),
+                "dataset": (
+                    target_dataset
+                ),
+                "model": (
+                    model_name
+                ),
+                "unique_id": (
+                    artifact
+                    .target_model_unique_id
+                ),
+                "relation": {
+                    "schema": (
+                        artifact
+                        .relation_schema
+                    ),
+                    "name": (
+                        artifact
+                        .relation_name
+                    ),
+                },
+            },
+            metadata={
+                "invocation_id": (
+                    artifact
+                    .invocation_id
+                ),
+                "plan_fingerprint": (
+                    plan_fingerprint
+                ),
+                "quality_contract_fingerprint": (
+                    quality_contract_fingerprint
+                ),
+                "dependencies": list(
+                    artifact
+                    .dependency_unique_ids
+                ),
+                "executed_models": list(
+                    artifact
+                    .executed_model_unique_ids
+                ),
+                "execution": {
+                    "target_status": (
+                        artifact
+                        .target_status
+                    ),
+                    "target_execution_time_seconds": (
+                        artifact
+                        .target_execution_time_seconds
+                    ),
+                    "total_elapsed_time_seconds": (
+                        artifact
+                        .elapsed_time_seconds
+                    ),
+                },
+                "tests": tests,
+            },
         )

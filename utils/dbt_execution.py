@@ -17,9 +17,16 @@ from utils.data_layers import (
     DataLayer,
     validate_dataset_name,
 )
+
 from utils.exceptions import (
+    DBTArtifactError,
     DBTExecutionError,
     DatasetError,
+)
+
+from utils.dbt_artifacts import (
+    DBTArtifactReader,
+    DBTBuildArtifactSummary,
 )
 
 
@@ -36,6 +43,7 @@ class DBTBuildResult:
     dataset_name: str
     model_name: str
     selector: str
+    artifact: DBTBuildArtifactSummary
 
 
 class DBTExecutor:
@@ -71,6 +79,7 @@ class DBTExecutor:
         target_schema: str,
         threads: int,
         runner_factory=None,
+        artifact_reader=None,
     ):
         self.dbt_project_dir = (
             dbt_project_dir.resolve()
@@ -95,6 +104,16 @@ class DBTExecutor:
             if runner_factory
             is not None
             else dbtRunner
+        )
+
+        self._artifact_reader = (
+            artifact_reader
+            if artifact_reader is not None
+            else DBTArtifactReader(
+                dbt_project_dir=(
+                    self.dbt_project_dir
+                )
+            )
         )
 
     # ============================================================
@@ -420,7 +439,7 @@ class DBTExecutor:
                         self._runner_factory()
                     )
 
-                    result = (
+                    runner_result = (
                         runner.invoke(
                             cli_args
                         )
@@ -449,41 +468,118 @@ class DBTExecutor:
                         },
                     ) from None
 
-        if not result.success:
+            # ========================================================
+            # DBT EXECUTION RESULT
+            # ========================================================
 
-            failure_kind = (
-                "unhandled_error"
-                if (
-                    result.exception
-                    is not None
+            if not runner_result.success:
+
+                failure_kind = (
+                    "unhandled_error"
+                    if (
+                        runner_result.exception
+                        is not None
+                    )
+                    else "build_failed"
                 )
-                else "build_failed"
-            )
 
-            raise DBTExecutionError(
-                "dbt build did not "
-                "complete successfully.",
-                details={
-                    "layer": (
-                        layer.value
-                    ),
-                    "dataset": (
-                        safe_dataset_name
-                    ),
-                    "model": (
-                        model_name
-                    ),
-                    "failure_kind": (
-                        failure_kind
-                    ),
-                },
-            )
+                raise DBTExecutionError(
+                    "dbt build did not "
+                    "complete successfully.",
+                    details={
+                        "layer": (
+                            layer.value
+                        ),
+                        "dataset": (
+                            safe_dataset_name
+                        ),
+                        "model": (
+                            model_name
+                        ),
+                        "failure_kind": (
+                            failure_kind
+                        ),
+                    },
+                )
 
-        return DBTBuildResult(
-            layer=layer,
-            dataset_name=(
-                safe_dataset_name
-            ),
-            model_name=model_name,
-            selector=selector,
-        )
+            # ========================================================
+            # ARTIFACT CORRELATION
+            # ========================================================
+            #
+            # Important:
+            # Parse while _DBT_EXECUTION_LOCK is still held.
+            #
+            # manifest.json and run_results.json are mutable
+            # target artifacts shared by dbt invocations.
+            # ========================================================
+
+            try:
+                artifact = (
+                    self._artifact_reader
+                    .parse_build(
+                        model_name=(
+                            model_name
+                        )
+                    )
+                )
+
+            except DBTArtifactError as exc:
+                raise DBTExecutionError(
+                    "dbt build completed but its "
+                    "artifacts could not be validated.",
+                    details={
+                        "layer": (
+                            layer.value
+                        ),
+                        "dataset": (
+                            safe_dataset_name
+                        ),
+                        "model": (
+                            model_name
+                        ),
+                        "failure_kind": (
+                            "artifact_validation_error"
+                        ),
+                        "exception_type": (
+                            type(
+                                exc
+                            ).__name__
+                        ),
+                    },
+                ) from None
+
+            if (
+                artifact.target_status
+                != "success"
+            ):
+                raise DBTExecutionError(
+                    "dbt artifact does not report "
+                    "a successful target model.",
+                    details={
+                        "layer": (
+                            layer.value
+                        ),
+                        "dataset": (
+                            safe_dataset_name
+                        ),
+                        "model": (
+                            model_name
+                        ),
+                        "failure_kind": (
+                            "artifact_status_mismatch"
+                        ),
+                        "target_status": (
+                            artifact.target_status
+                        ),
+                    },
+                )
+
+            return DBTBuildResult(
+                layer=layer,
+                dataset_name=(
+                    safe_dataset_name
+                ),
+                model_name=model_name,
+                selector=selector,
+                artifact=artifact,
+            )

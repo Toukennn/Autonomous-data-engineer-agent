@@ -7,6 +7,11 @@ from utils.lineage import (
     payload_fingerprint,
 )
 
+from utils.dbt_artifacts import (
+    DBTBuildArtifactSummary,
+    DBTTestArtifactResult,
+)
+
 
 def test_payload_fingerprint_is_stable():
     first = payload_fingerprint(
@@ -466,4 +471,144 @@ def test_warehouse_sync_lineage_rejects_non_bronze_schema(
     assert (
         store.get_events()
         == []
+    )
+
+
+def test_lineage_records_dbt_build(
+    tmp_path,
+):
+    store = LineageStore(
+        tmp_path
+        / "data"
+    )
+
+    artifact = (
+        DBTBuildArtifactSummary(
+            invocation_id=(
+                "12345678-1234-5678-"
+                "1234-567812345678"
+            ),
+            command="build",
+            target_model_unique_id=(
+                "model."
+                "autonomous_data_engineer."
+                "stg_orders"
+            ),
+            target_model_name=(
+                "stg_orders"
+            ),
+            target_status="success",
+            target_execution_time_seconds=(
+                0.25
+            ),
+            relation_schema=(
+                "dbt_test_silver"
+            ),
+            relation_name=(
+                "stg_orders"
+            ),
+            dependency_unique_ids=(
+                (
+                    "source."
+                    "autonomous_data_engineer."
+                    "bronze.orders"
+                ),
+            ),
+            executed_model_unique_ids=(
+                (
+                    "model."
+                    "autonomous_data_engineer."
+                    "stg_orders"
+                ),
+            ),
+            tests=(
+                DBTTestArtifactResult(
+                    unique_id=(
+                        "test."
+                        "autonomous_data_engineer."
+                        "qc_orders"
+                    ),
+                    name="qc_orders",
+                    status="pass",
+                    execution_time_seconds=(
+                        0.05
+                    ),
+                    failures=0,
+                    directly_tests_target=True,
+                ),
+            ),
+            elapsed_time_seconds=(
+                0.4
+            ),
+        )
+    )
+
+    event_id = (
+        store.record_dbt_build(
+            source_layer=(
+                DataLayer.BRONZE
+            ),
+            source_dataset="orders",
+            target_layer=(
+                DataLayer.SILVER
+            ),
+            target_dataset=(
+                "clean_orders"
+            ),
+            model_name=(
+                "stg_orders"
+            ),
+            plan_fingerprint=(
+                "a" * 64
+            ),
+            quality_contract_fingerprint=(
+                "b" * 64
+            ),
+            artifact=artifact,
+        )
+    )
+
+    assert event_id
+
+    event = (
+        store.get_events()[0]
+    )
+
+    assert (
+        event["operation"]
+        == "dbt_build"
+    )
+
+    assert (
+        event["source"]["layer"]
+        == "bronze"
+    )
+
+    assert (
+        event["target"]["layer"]
+        == "silver"
+    )
+
+    assert (
+        event["target"]["relation"][
+            "schema"
+        ]
+        == "dbt_test_silver"
+    )
+
+    assert (
+        event["metadata"][
+            "invocation_id"
+        ]
+        == (
+            "12345678-1234-5678-"
+            "1234-567812345678"
+        )
+    )
+
+    assert (
+        event["metadata"][
+            "tests"
+        ][0]["status"]
+        == "pass"
     )

@@ -8,13 +8,20 @@ import pytest
 from utils.data_layers import (
     DataLayer,
 )
+
 from utils.dbt_execution import (
     DBTExecutor,
 )
+
 from utils.exceptions import (
     DBTExecutionError,
     DatasetError,
 )
+
+from utils.dbt_artifacts import (
+    DBTBuildArtifactSummary,
+)
+
 
 
 def _db_config():
@@ -62,6 +69,77 @@ def _create_model(
         encoding="utf-8",
     )
 
+class FakeArtifactReader:
+    """
+    Deterministic artifact reader used by
+    successful dbt executor unit tests.
+
+    FakeRunner does not create real dbt
+    target artifacts, so these tests inject
+    the validated artifact boundary directly.
+    """
+
+    def parse_build(
+        self,
+        *,
+        model_name: str,
+    ) -> DBTBuildArtifactSummary:
+
+        if model_name.startswith(
+            "stg_"
+        ):
+            relation_schema = (
+                "dbt_test_silver"
+            )
+
+        else:
+            relation_schema = (
+                "dbt_test_gold"
+            )
+
+        unique_id = (
+            "model."
+            "autonomous_data_engineer."
+            f"{model_name}"
+        )
+
+        return (
+            DBTBuildArtifactSummary(
+                invocation_id=(
+                    "12345678-1234-5678-"
+                    "1234-567812345678"
+                ),
+                command="build",
+                target_model_unique_id=(
+                    unique_id
+                ),
+                target_model_name=(
+                    model_name
+                ),
+                target_status=(
+                    "success"
+                ),
+                target_execution_time_seconds=(
+                    0.2
+                ),
+                relation_schema=(
+                    relation_schema
+                ),
+                relation_name=(
+                    model_name
+                ),
+                dependency_unique_ids=(),
+                executed_model_unique_ids=(
+                    (
+                        unique_id,
+                    )
+                ),
+                tests=(),
+                elapsed_time_seconds=(
+                    0.3
+                ),
+            )
+        )
 
 def test_silver_build_uses_exact_selector(
     tmp_path,
@@ -106,6 +184,9 @@ def test_silver_build_uses_exact_selector(
         target_schema="dbt_test",
         threads=1,
         runner_factory=FakeRunner,
+        artifact_reader=(
+            FakeArtifactReader()
+        ),
     )
 
     result = executor.build_model(
@@ -173,6 +254,9 @@ def test_gold_build_includes_ancestors(
         target_schema="dbt_test",
         threads=1,
         runner_factory=FakeRunner,
+        artifact_reader=(
+            FakeArtifactReader()
+        ),
     )
 
     result = executor.build_model(
@@ -333,6 +417,9 @@ def test_dbt_environment_is_restored(
         target_schema="dbt_test",
         threads=1,
         runner_factory=FakeRunner,
+        artifact_reader=(
+            FakeArtifactReader()
+        ),
     )
 
     executor.build_model(
