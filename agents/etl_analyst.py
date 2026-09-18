@@ -1131,26 +1131,26 @@ def llm_node(state: ETLAgentSchema):
         ↓
     Gold
 
-    You have four tools:
+    You have six different tools:
 
     1. extract_load_tool
-
     Extract API data into Bronze.
 
     2. bronze_to_silver_tool
-
-    Create cleaned/standardized Silver datasets
-    from Bronze.
+    Legacy/file-backed deterministic Silver transformation.
 
     3. silver_to_gold_tool
+    Legacy/file-backed deterministic Gold transformation.
 
-    Create curated Gold datasets from Silver.
+    4. dbt_bronze_to_silver_tool
+    Warehouse-backed Bronze → Silver transformation using
+    PostgreSQL + dbt.
 
-    4. configure_quality_contract_tool
+    5. dbt_silver_to_gold_tool
+    Warehouse-backed Silver → Gold transformation using dbt.
 
-    Create a persisted data-quality contract for a
-    Silver or Gold logical dataset when the user
-    explicitly specifies quality requirements.
+    6. configure_quality_contract_tool
+    Configure explicit Silver/Gold quality requirements.
 
 
     Rules:
@@ -1167,6 +1167,21 @@ def llm_node(state: ETLAgentSchema):
     - Never modify Silver while producing Gold.
     - Do not claim an operation succeeded unless its tool succeeded.
     - Use csv when no output format is specified.
+    - When the user explicitly requests dbt, PostgreSQL,
+      warehouse-backed transformations, or warehouse models,
+      use the dbt tools.
+    - Do not manually call or simulate dbt commands.
+    - Never generate SQL yourself.
+    - Never invent dbt model names or selectors.
+    - The dbt tools internally generate and execute models.
+    - A dbt Gold dataset must come from an existing dbt
+    Silver dataset.
+    - Do not mix a file-backed Silver dataset with a dbt
+    Gold dataset, or vice versa, unless the user explicitly
+    asks for migration between the two systems.
+    - If quality requirements are explicitly requested,
+    configure the target dataset's contract BEFORE
+    invoking its dbt transformation tool.
 
 
     Data-quality rules:
