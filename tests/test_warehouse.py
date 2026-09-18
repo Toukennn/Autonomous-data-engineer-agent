@@ -115,7 +115,36 @@ def test_bronze_table_load_commits(
 
     assert (
         cursor.execute.call_count
-        == 3
+        >= 3
+    )
+
+    executed_queries = [
+        repr(
+            call.args[0]
+        ).upper()
+        for call
+        in cursor.execute.call_args_list
+    ]
+
+    assert not any(
+        "DROP TABLE"
+        in query
+        for query
+        in executed_queries
+    )
+
+    assert any(
+        "CREATE TABLE"
+        in query
+        for query
+        in executed_queries
+    )
+
+    assert any(
+        "TRUNCATE TABLE"
+        in query
+        for query
+        in executed_queries
     )
 
     assert inserted["rows"] == [
@@ -372,3 +401,180 @@ def test_overlong_column_name_is_rejected(
         )
 
     connect_mock.assert_not_called()
+
+
+def test_existing_bronze_table_is_refreshed_without_drop(
+    monkeypatch,
+):
+    connection = MagicMock()
+    cursor = MagicMock()
+
+    connection.cursor\
+        .return_value\
+        .__enter__\
+        .return_value = cursor
+
+    monkeypatch.setattr(
+        "utils.warehouse.psycopg2.connect",
+        lambda **kwargs: connection,
+    )
+
+    loader = _loader()
+
+    monkeypatch.setattr(
+        loader,
+        "_get_existing_columns",
+        lambda **kwargs: {
+            "name": "TEXT",
+            "url": "TEXT",
+        },
+    )
+
+    monkeypatch.setattr(
+        "utils.warehouse.execute_values",
+        MagicMock(),
+    )
+
+    dataframe = pd.DataFrame(
+        {
+            "name": [
+                "bulbasaur",
+            ],
+            "url": [
+                "https://example.com/1",
+            ],
+        }
+    )
+
+    loader.replace_bronze_table(
+        dataset_name="pokemon",
+        dataframe=dataframe,
+    )
+
+    # The important invariant:
+    # existing relation is preserved rather
+    # than dropped/recreated.
+
+    for call in (
+        cursor.execute
+        .call_args_list
+    ):
+        query = call.args[0]
+
+        # psycopg2 Composed objects expose their
+        # structure through repr().
+        assert (
+            "DROP TABLE"
+            not in repr(query).upper()
+        )
+
+    connection.commit\
+        .assert_called_once()
+
+    connection.rollback\
+        .assert_not_called()
+
+
+
+def test_existing_bronze_table_adds_new_column(
+    monkeypatch,
+):
+    connection = MagicMock()
+    cursor = MagicMock()
+
+    connection.cursor\
+        .return_value\
+        .__enter__\
+        .return_value = cursor
+
+    monkeypatch.setattr(
+        "utils.warehouse.psycopg2.connect",
+        lambda **kwargs: connection,
+    )
+
+    loader = _loader()
+
+    monkeypatch.setattr(
+        loader,
+        "_get_existing_columns",
+        lambda **kwargs: {
+            "id": "BIGINT",
+        },
+    )
+
+    monkeypatch.setattr(
+        "utils.warehouse.execute_values",
+        MagicMock(),
+    )
+
+    dataframe = pd.DataFrame(
+        {
+            "id": [1],
+            "name": ["alice"],
+        }
+    )
+
+    loader.replace_bronze_table(
+        dataset_name="customers",
+        dataframe=dataframe,
+    )
+
+    query_reprs = [
+        repr(call.args[0]).upper()
+        for call
+        in cursor.execute.call_args_list
+    ]
+
+    assert any(
+        "ALTER TABLE"
+        in query
+        and "ADD COLUMN"
+        in query
+        for query in query_reprs
+    )
+
+
+
+def test_existing_bronze_table_rejects_type_change(
+    monkeypatch,
+):
+    connection = MagicMock()
+    cursor = MagicMock()
+
+    connection.cursor\
+        .return_value\
+        .__enter__\
+        .return_value = cursor
+
+    monkeypatch.setattr(
+        "utils.warehouse.psycopg2.connect",
+        lambda **kwargs: connection,
+    )
+
+    loader = _loader()
+
+    monkeypatch.setattr(
+        loader,
+        "_get_existing_columns",
+        lambda **kwargs: {
+            "amount": "BIGINT",
+        },
+    )
+
+    dataframe = pd.DataFrame(
+        {
+            "amount": [1.5],
+        }
+    )
+
+    with pytest.raises(
+        DatasetError,
+        match="type change",
+    ):
+        loader.replace_bronze_table(
+            dataset_name="orders",
+            dataframe=dataframe,
+        )
+
+    connection.rollback\
+        .assert_called_once()
