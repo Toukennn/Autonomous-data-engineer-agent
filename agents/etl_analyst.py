@@ -5,7 +5,12 @@ from langchain_core.messages import (
 )
 from langgraph.graph import END, START, StateGraph
 
-from models.schema import ETLAgentSchema, TransformPlan
+from models.schema import (
+    DBTTransformPlan,
+    ETLAgentSchema,
+    TransformPlan,
+)
+
 from utils.etl_tools import ETLTools
 from utils.llm_pick import pick_llm
 
@@ -114,6 +119,108 @@ Rules:
 
     return planner_llm.invoke(
         prompt
+    )
+
+
+def create_dbt_transform_plan(
+    *,
+    user_question: str,
+    dataset_context: str,
+    target_layer: Literal[
+        "silver",
+        "gold",
+    ],
+) -> DBTTransformPlan:
+    """
+    Convert a user transformation request into a
+    validated dbt transformation plan.
+
+    The LLM decides WHAT should happen.
+
+    Deterministic Python decides HOW the plan becomes
+    PostgreSQL/dbt SQL.
+    """
+
+    planner_llm = (
+        pick_llm("claude")
+        .with_structured_output(
+            DBTTransformPlan
+        )
+    )
+
+    aggregation_rule = (
+        (
+            "- groupby_aggregate IS allowed because "
+            "the target is Gold."
+        )
+        if target_layer == "gold"
+        else (
+            "- groupby_aggregate is NOT allowed "
+            "for Silver."
+        )
+    )
+
+    prompt = f"""
+You are a dbt transformation planner.
+
+Your job is to decide WHAT transformation is required.
+
+You MUST NOT write SQL, Jinja, Python, shell commands,
+dbt commands, filesystem paths, or database credentials.
+
+Your response must be a DBTTransformPlan.
+
+Target layer:
+
+{target_layer}
+
+User request:
+
+{user_question}
+
+Input dataset metadata:
+
+{dataset_context}
+
+Supported operations:
+
+- select_columns
+- rename_columns
+- filter_rows
+- fill_missing
+- cast_columns
+- string_transform
+- groupby_aggregate
+
+Rules:
+
+- Never generate SQL.
+- Never generate Jinja.
+- Never generate Python.
+- Never generate shell or dbt commands.
+- Never invent column names.
+- Only reference input columns listed in the metadata,
+  except new names explicitly created by rename operations
+  or aggregation aliases.
+- Preserve columns unless the user asks to remove them.
+- Use the minimum number of operations necessary.
+- Operations execute in exactly the order provided.
+- If a cast is required before filtering or aggregation,
+  perform the cast first.
+- Silver is for cleaning, standardization, filtering,
+  typing, and projection.
+- Gold is for analytics-ready business transformations,
+  including aggregation.
+{aggregation_rule}
+- Do not attempt to bypass these restrictions.
+- The summary must briefly describe the requested
+  transformation.
+"""
+
+    return (
+        planner_llm.invoke(
+            prompt
+        )
     )
 
 
@@ -231,6 +338,14 @@ def _safe_tool_metadata(
             "layer",
             "dataset_name",
         },
+        "dbt_bronze_to_silver_tool": {
+            "source_dataset_name",
+            "target_dataset_name",
+        },
+        "dbt_silver_to_gold_tool": {
+            "source_dataset_name",
+            "target_dataset_name",
+        },
     }
 
     allowed = (
@@ -245,6 +360,9 @@ def _safe_tool_metadata(
         for key in allowed
         if key in args
     }
+
+
+
 
 
 def _safe_quality_failure_metadata(
@@ -710,6 +828,216 @@ def configure_quality_contract_tool(
     )
 
 
+@tool
+def dbt_bronze_to_silver_tool(
+    source_dataset_name: str,
+    user_question: str,
+    target_dataset_name: str | None = None,
+) -> str:
+    """
+    Create and execute a warehouse-backed Silver dbt
+    model from a Bronze logical dataset.
+
+    This tool deterministically:
+
+    1. synchronizes Bronze into PostgreSQL
+    2. exposes safe Bronze metadata to the planner
+    3. obtains a validated DBTTransformPlan
+    4. compiles the plan into application-controlled SQL
+    5. creates the Silver dbt model
+    6. synchronizes its quality contract
+    7. runs the bounded dbt build
+
+    The LLM never supplies SQL, selectors, dbt commands,
+    paths, profiles, or credentials.
+
+    Args:
+        source_dataset_name:
+            Existing Bronze logical dataset.
+
+        user_question:
+            User-requested Silver transformation.
+
+        target_dataset_name:
+            Optional logical Silver dataset name.
+    """
+
+    etl_tools = ETLTools()
+
+    target_name = (
+        target_dataset_name
+        if target_dataset_name
+        is not None
+        else source_dataset_name
+    )
+
+    # ============================================================
+    # BRONZE -> POSTGRESQL
+    # ============================================================
+
+    warehouse_result = (
+        etl_tools
+        .load_bronze_to_warehouse(
+            dataset_name=(
+                source_dataset_name
+            )
+        )
+    )
+
+    # ============================================================
+    # PLANNER CONTEXT
+    # ============================================================
+
+    dataset_context = (
+        etl_tools
+        .get_dbt_planner_context(
+            layer=DataLayer.BRONZE,
+            dataset_name=(
+                source_dataset_name
+            ),
+        )
+    )
+
+    # ============================================================
+    # LLM DECIDES WHAT
+    # ============================================================
+
+    plan = (
+        create_dbt_transform_plan(
+            user_question=(
+                user_question
+            ),
+            dataset_context=(
+                dataset_context
+            ),
+            target_layer="silver",
+        )
+    )
+
+    # ============================================================
+    # DETERMINISTIC MODEL GENERATION
+    # ============================================================
+
+    model_result = (
+        etl_tools
+        .create_dbt_silver_model(
+            source_dataset=(
+                source_dataset_name
+            ),
+            target_dataset=(
+                target_name
+            ),
+            plan=plan,
+        )
+    )
+
+    # ============================================================
+    # BOUNDED DBT EXECUTION
+    # ============================================================
+
+    build_result = (
+        etl_tools
+        .build_dbt_dataset(
+            layer=DataLayer.SILVER,
+            dataset_name=(
+                target_name
+            ),
+        )
+    )
+
+    return (
+        f"{warehouse_result}\n\n"
+        f"{model_result}\n\n"
+        f"{build_result}"
+    )
+
+
+@tool
+def dbt_silver_to_gold_tool(
+    source_dataset_name: str,
+    user_question: str,
+    target_dataset_name: str | None = None,
+) -> str:
+    """
+    Create and execute a warehouse-backed Gold dbt
+    model from an existing Silver dbt dataset.
+
+    The LLM produces only a DBTTransformPlan.
+
+    Application-controlled code owns:
+    - Silver model resolution
+    - input/output schemas
+    - SQL compilation
+    - ref() dependencies
+    - model files
+    - selectors
+    - dbt execution
+    - database credentials
+    """
+
+    etl_tools = ETLTools()
+
+    target_name = (
+        target_dataset_name
+        if target_dataset_name
+        is not None
+        else source_dataset_name
+    )
+
+    # ============================================================
+    # PLANNER CONTEXT FROM ACTUAL SILVER OUTPUT
+    # ============================================================
+
+    dataset_context = (
+        etl_tools
+        .get_dbt_planner_context(
+            layer=DataLayer.SILVER,
+            dataset_name=(
+                source_dataset_name
+            ),
+        )
+    )
+
+    plan = (
+        create_dbt_transform_plan(
+            user_question=(
+                user_question
+            ),
+            dataset_context=(
+                dataset_context
+            ),
+            target_layer="gold",
+        )
+    )
+
+    model_result = (
+        etl_tools
+        .create_dbt_gold_model(
+            source_dataset=(
+                source_dataset_name
+            ),
+            target_dataset=(
+                target_name
+            ),
+            plan=plan,
+        )
+    )
+
+    build_result = (
+        etl_tools
+        .build_dbt_dataset(
+            layer=DataLayer.GOLD,
+            dataset_name=(
+                target_name
+            ),
+        )
+    )
+
+    return (
+        f"{model_result}\n\n"
+        f"{build_result}"
+    )
+
 # ============================================================
 # TOOLKIT
 # ============================================================
@@ -718,6 +1046,8 @@ tools = [
     extract_load_tool,
     bronze_to_silver_tool,
     silver_to_gold_tool,
+    dbt_bronze_to_silver_tool,
+    dbt_silver_to_gold_tool,
     configure_quality_contract_tool,
 ]
 

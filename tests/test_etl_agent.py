@@ -296,8 +296,21 @@ def test_etl_agent_exposes_only_safe_tools():
         "extract_load_tool",
         "bronze_to_silver_tool",
         "silver_to_gold_tool",
+        "dbt_bronze_to_silver_tool",
+        "dbt_silver_to_gold_tool",
         "configure_quality_contract_tool",
     }
+
+    for forbidden_tool in {
+        "load_bronze_to_warehouse",
+        "create_dbt_silver_model",
+        "create_dbt_gold_model",
+        "build_dbt_dataset",
+    }:
+        assert (
+            forbidden_tool
+            not in etl_module.tools_by_name
+        )
 
     assert (
         "transform_load_tool"
@@ -1022,4 +1035,136 @@ def test_quality_failure_is_recorded_safely(
     assert (
         raw_requirement
         not in str(execution)
+    )
+
+
+def test_etl_agent_orchestrates_dbt_medallion_in_order(
+    monkeypatch,
+):
+    calls = []
+
+    fake_llm = FakeLLM(
+        [
+            make_tool_call(
+                name="extract_load_tool",
+                call_id="extract",
+                args={
+                    "url": (
+                        "https://example.com/orders"
+                    ),
+                    "dataset_name": "orders",
+                },
+            ),
+            make_tool_call(
+                name=(
+                    "dbt_bronze_to_silver_tool"
+                ),
+                call_id="silver",
+                args={
+                    "source_dataset_name": (
+                        "orders"
+                    ),
+                    "target_dataset_name": (
+                        "clean_orders"
+                    ),
+                    "user_question": (
+                        "Clean the orders."
+                    ),
+                },
+            ),
+            make_tool_call(
+                name=(
+                    "dbt_silver_to_gold_tool"
+                ),
+                call_id="gold",
+                args={
+                    "source_dataset_name": (
+                        "clean_orders"
+                    ),
+                    "target_dataset_name": (
+                        "sales_summary"
+                    ),
+                    "user_question": (
+                        "Aggregate sales."
+                    ),
+                },
+            ),
+            AIMessage(
+                content="dbt pipeline completed."
+            ),
+        ]
+    )
+
+    monkeypatch.setattr(
+        etl_module,
+        "etl_llm_with_tools",
+        fake_llm,
+    )
+
+    fake_tools = {
+        "extract_load_tool": FakeTool(
+            "extract_load_tool",
+            calls,
+            "bronze ok",
+        ),
+        "dbt_bronze_to_silver_tool": FakeTool(
+            "dbt_bronze_to_silver_tool",
+            calls,
+            "silver ok",
+        ),
+        "dbt_silver_to_gold_tool": FakeTool(
+            "dbt_silver_to_gold_tool",
+            calls,
+            "gold ok",
+        ),
+    }
+
+    monkeypatch.setattr(
+        etl_module,
+        "tools_by_name",
+        fake_tools,
+    )
+
+    result = (
+        etl_module.etl_analyst.invoke(
+            {
+                "messages": [
+                    HumanMessage(
+                        content=(
+                            "Build orders through "
+                            "dbt Bronze, Silver, "
+                            "and Gold."
+                        )
+                    )
+                ]
+            }
+        )
+    )
+
+    assert [
+        call["name"]
+        for call in calls
+    ] == [
+        "extract_load_tool",
+        "dbt_bronze_to_silver_tool",
+        "dbt_silver_to_gold_tool",
+    ]
+
+    assert (
+        calls[1]["args"][
+            "target_dataset_name"
+        ]
+        == "clean_orders"
+    )
+
+    assert (
+        calls[2]["args"][
+            "source_dataset_name"
+        ]
+        == "clean_orders"
+    )
+
+    assert (
+        result["messages"][-1].content
+        == "dbt pipeline completed."
     )

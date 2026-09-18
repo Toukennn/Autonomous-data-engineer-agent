@@ -3819,6 +3819,121 @@ class ETLTools:
         )
 
 
+    def get_dbt_planner_context(
+        self,
+        *,
+        layer: DataLayer,
+        dataset_name: str,
+    ) -> str:
+        """
+        Return application-controlled, planner-safe
+        metadata for a dbt transformation.
+
+        No filesystem paths, credentials, SQL, or
+        dbt execution arguments are exposed.
+        """
+
+        safe_dataset_name = (
+            validate_dataset_name(
+                dataset_name
+            )
+        )
+
+        if layer == DataLayer.BRONZE:
+
+            source_metadata = (
+                self.dbt_source_registry
+                .get_registered_source(
+                    safe_dataset_name
+                )
+            )
+
+            columns = (
+                source_metadata.get(
+                    "columns"
+                )
+            )
+
+            if not isinstance(
+                columns,
+                list,
+            ):
+                raise DatasetError(
+                    "Registered dbt source is missing "
+                    "its column metadata."
+                )
+
+            context = {
+                "layer": (
+                    DataLayer.BRONZE.value
+                ),
+                "dataset": (
+                    safe_dataset_name
+                ),
+                "columns": columns,
+                "schema": (
+                    source_metadata.get(
+                        "source_schema",
+                        {},
+                    )
+                ),
+            }
+
+        elif layer == DataLayer.SILVER:
+
+            model_metadata = (
+                self.dbt_model_metadata_store
+                .load(
+                    layer=(
+                        DataLayer.SILVER
+                    ),
+                    dataset_name=(
+                        safe_dataset_name
+                    ),
+                )
+            )
+
+            if model_metadata is None:
+                raise DatasetError(
+                    "Silver dbt model metadata does "
+                    f"not exist for dataset: "
+                    f"{safe_dataset_name}"
+                )
+
+            context = {
+                "layer": (
+                    DataLayer.SILVER.value
+                ),
+                "dataset": (
+                    safe_dataset_name
+                ),
+                "columns": list(
+                    model_metadata
+                    .output_columns
+                ),
+                "source_dataset": (
+                    model_metadata
+                    .source_dataset_name
+                ),
+                "model_name": (
+                    model_metadata
+                    .model_name
+                ),
+            }
+
+        else:
+            raise DatasetError(
+                "dbt planner context supports "
+                "Bronze and Silver only."
+            )
+
+        return json.dumps(
+            context,
+            indent=2,
+            ensure_ascii=False,
+        )
+
+
     def create_dbt_silver_model(
         self,
         *,
