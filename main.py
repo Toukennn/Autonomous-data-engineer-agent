@@ -8,13 +8,19 @@ if __name__ == "__main__":
             "messages": [
                 HumanMessage(
                     content=(
-                        "Extract the first page of Pokémon data from "
+                        "Build this pipeline using PostgreSQL and dbt for "
+                        "the Silver and Gold transformations. "
+
+                        "Extract only the first page of Pokémon data from "
                         "https://pokeapi.co/api/v2/pokemon?limit=20&offset=0 "
-                        "into a CSV dataset named pokemon. "
-                        "Then create a Silver dataset named pokemon_clean "
-                        "by stripping and lowercasing the name column and "
-                        "keeping only name and url. "
-                        "Then create a Gold dataset named pokemon_saur "
+                        "without pagination into a CSV Bronze dataset named "
+                        "pokemon. "
+
+                        "Then use the warehouse-backed dbt pipeline to create "
+                        "a Silver dataset named pokemon_clean by stripping and "
+                        "lowercasing the name column and keeping only name and url. "
+
+                        "Then use dbt to create a Gold dataset named pokemon_saur "
                         "containing only Pokémon whose name contains 'saur', "
                         "keeping name and url."
                     )
