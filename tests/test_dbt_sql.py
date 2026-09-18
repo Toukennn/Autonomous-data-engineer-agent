@@ -145,3 +145,5 @@ def test_silver_rejects_aggregation():
             relation_name="orders",
             allow_aggregation=False,
         )
+
+        

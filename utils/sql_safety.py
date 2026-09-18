@@ -4,7 +4,10 @@ import re
 import sqlglot
 from sqlglot import exp
 from sqlglot.errors import ParseError
-
+from sqlglot.optimizer.scope import (
+    Scope,
+    build_scope,
+)
 
 @dataclass(
     frozen=True
@@ -349,20 +352,20 @@ class SQLSafetyValidator:
         analytics_catalog: dict,
     ) -> SQLValidationResult | None:
         """
-        Validate all physical table references against
-        the application-controlled analytics catalog.
+        Validate physical PostgreSQL relations
+        against the governed analytics catalog.
 
-        Returns None when relation validation succeeds.
+        SQLGlot scopes are used so CTEs and
+        subqueries cannot be confused with
+        physical database relations.
         """
 
         try:
             (
                 allowed_schemas,
                 allowed_relations,
-            ) = (
-                cls._catalog_allowlist(
-                    analytics_catalog
-                )
+            ) = cls._catalog_allowlist(
+                analytics_catalog
             )
 
         except ValueError as exc:
@@ -375,152 +378,230 @@ class SQLSafetyValidator:
                 ),
             )
 
-        # ----------------------------------------------------
-        # QUERY-LOCAL CTE NAMES
-        # ----------------------------------------------------
-        #
-        # SQLGlot represents references to CTEs as Table
-        # expressions too. Those references are allowed to
-        # remain unqualified because they are not physical
-        # PostgreSQL relations.
-        # ----------------------------------------------------
+        # ========================================================
+        # BUILD SQL SCOPE GRAPH
+        # ========================================================
 
-        cte_names = {
-            cte.alias_or_name
-            for cte
-            in statement.find_all(
-                exp.CTE
+        try:
+            root_scope = (
+                build_scope(
+                    statement
+                )
             )
-            if cte.alias_or_name
-        }
+
+        except Exception:
+
+            return SQLValidationResult(
+                is_safe=False,
+                reason=(
+                    "SQL relation scopes could "
+                    "not be analyzed safely."
+                ),
+            )
+
+        if root_scope is None:
+
+            return SQLValidationResult(
+                is_safe=False,
+                reason=(
+                    "SQL relation scopes could "
+                    "not be resolved."
+                ),
+            )
 
         governed_relation_count = 0
 
-        # ----------------------------------------------------
-        # PHYSICAL RELATIONS
-        # ----------------------------------------------------
-
-        for table in statement.find_all(
-            exp.Table
-        ):
-
-            relation_name = (
-                table.name
-            )
-
-            schema_name = (
-                table.db
-            )
-
-            catalog_name = (
-                table.catalog
-            )
-
-            if not relation_name:
-
-                return SQLValidationResult(
-                    is_safe=False,
-                    reason=(
-                        "Query contains an invalid "
-                        "relation reference."
-                    ),
-                )
-
-            # PostgreSQL does not require cross-database
-            # qualification for this application.
-            if catalog_name:
-
-                return SQLValidationResult(
-                    is_safe=False,
-                    reason=(
-                        "Cross-database relation "
-                        "references are not allowed."
-                    ),
-                )
-
-            # --------------------------------------------
-            # UNQUALIFIED NAME
-            # --------------------------------------------
-
-            if not schema_name:
-
-                if (
-                    relation_name
-                    in cte_names
-                ):
-                    continue
-
-                return SQLValidationResult(
-                    is_safe=False,
-                    reason=(
-                        "Physical analytics relations "
-                        "must be schema-qualified: "
-                        f"{relation_name}"
-                    ),
-                )
-
-            # --------------------------------------------
-            # SCHEMA ALLOWLIST
-            # --------------------------------------------
-
-            if (
-                schema_name
-                not in allowed_schemas
-            ):
-
-                return SQLValidationResult(
-                    is_safe=False,
-                    reason=(
-                        "Query references an "
-                        "unauthorized schema: "
-                        f"{schema_name}"
-                    ),
-                )
-
-            # --------------------------------------------
-            # RELATION ALLOWLIST
-            # --------------------------------------------
-
-            relation_key = (
-                schema_name,
-                relation_name,
-            )
-
-            if (
-                relation_key
-                not in allowed_relations
-            ):
-
-                return SQLValidationResult(
-                    is_safe=False,
-                    reason=(
-                        "Query references a relation "
-                        "that is not present in the "
-                        "governed analytics catalog: "
-                        f"{schema_name}."
-                        f"{relation_name}"
-                    ),
-                )
-
-            governed_relation_count += 1
-
-        # ----------------------------------------------------
-        # REQUIRE GOVERNED DATA ACCESS
-        # ----------------------------------------------------
+        # ========================================================
+        # PHYSICAL SOURCES
+        # ========================================================
         #
-        # In governed analytics mode, SELECT 1 or a query
-        # composed entirely of local CTE constants is not
-        # considered an analytical warehouse query.
-        # ----------------------------------------------------
+        # Scope.selected_sources resolves the semantic
+        # meaning of FROM / JOIN sources.
+        #
+        # Physical relation:
+        #     exp.Table
+        #
+        # CTE / subquery:
+        #     Scope
+        #
+        # This avoids treating every exp.Table node
+        # as a real PostgreSQL relation.
+        # ========================================================
+
+        try:
+
+            scopes = (
+                root_scope.traverse()
+            )
+
+            for scope in scopes:
+
+                for (
+                    _alias,
+                    (
+                        _node,
+                        source,
+                    ),
+                ) in (
+                    scope
+                    .selected_sources
+                    .items()
+                ):
+
+                    # --------------------------------------------
+                    # CTE / SUBQUERY
+                    # --------------------------------------------
+
+                    if isinstance(
+                        source,
+                        Scope,
+                    ):
+                        continue
+
+                    # --------------------------------------------
+                    # UNKNOWN SOURCE TYPE
+                    # --------------------------------------------
+
+                    if not isinstance(
+                        source,
+                        exp.Table,
+                    ):
+                        return SQLValidationResult(
+                            is_safe=False,
+                            reason=(
+                                "Query contains an "
+                                "unsupported analytical "
+                                "source type."
+                            ),
+                        )
+
+                    relation_name = (
+                        source.name
+                    )
+
+                    schema_name = (
+                        source.db
+                    )
+
+                    catalog_name = (
+                        source.catalog
+                    )
+
+                    # --------------------------------------------
+                    # INVALID RELATION
+                    # --------------------------------------------
+
+                    if not relation_name:
+
+                        return SQLValidationResult(
+                            is_safe=False,
+                            reason=(
+                                "Query contains an "
+                                "invalid relation "
+                                "reference."
+                            ),
+                        )
+
+                    # --------------------------------------------
+                    # CROSS-DATABASE REFERENCE
+                    # --------------------------------------------
+
+                    if catalog_name:
+
+                        return SQLValidationResult(
+                            is_safe=False,
+                            reason=(
+                                "Cross-database relation "
+                                "references are not "
+                                "allowed."
+                            ),
+                        )
+
+                    # --------------------------------------------
+                    # REQUIRE SCHEMA QUALIFICATION
+                    # --------------------------------------------
+
+                    if not schema_name:
+
+                        return SQLValidationResult(
+                            is_safe=False,
+                            reason=(
+                                "Physical analytics "
+                                "relations must be "
+                                "schema-qualified: "
+                                f"{relation_name}"
+                            ),
+                        )
+
+                    # --------------------------------------------
+                    # SCHEMA ALLOWLIST
+                    # --------------------------------------------
+
+                    if (
+                        schema_name
+                        not in allowed_schemas
+                    ):
+
+                        return SQLValidationResult(
+                            is_safe=False,
+                            reason=(
+                                "Query references an "
+                                "unauthorized schema: "
+                                f"{schema_name}"
+                            ),
+                        )
+
+                    # --------------------------------------------
+                    # RELATION ALLOWLIST
+                    # --------------------------------------------
+
+                    relation_key = (
+                        schema_name,
+                        relation_name,
+                    )
+
+                    if (
+                        relation_key
+                        not in allowed_relations
+                    ):
+
+                        return SQLValidationResult(
+                            is_safe=False,
+                            reason=(
+                                "Query references a "
+                                "relation that is not "
+                                "present in the governed "
+                                "analytics catalog: "
+                                f"{schema_name}."
+                                f"{relation_name}"
+                            ),
+                        )
+
+                    governed_relation_count += 1
+
+        except Exception:
+
+            return SQLValidationResult(
+                is_safe=False,
+                reason=(
+                    "SQL relation scopes could "
+                    "not be validated safely."
+                ),
+            )
+
+        # ========================================================
+        # REQUIRE WAREHOUSE ACCESS
+        # ========================================================
 
         if governed_relation_count == 0:
 
             return SQLValidationResult(
                 is_safe=False,
                 reason=(
-                    "Governed analytics queries must "
-                    "reference at least one approved "
-                    "Silver or Gold relation."
+                    "Governed analytics queries "
+                    "must reference at least one "
+                    "approved Silver or Gold "
+                    "relation."
                 ),
             )
 

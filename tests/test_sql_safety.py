@@ -487,3 +487,47 @@ def test_governed_analytics_rejects_invalid_catalog():
         "forbidden schema"
         in result.reason
     )
+
+
+def test_nested_cte_name_cannot_hide_outer_physical_table():
+    """
+    A CTE named 'users' exists only inside
+    the nested EXISTS query.
+
+    The outer unqualified 'users' relation
+    must still be treated as a physical table
+    and rejected.
+    """
+
+    query = """
+    SELECT *
+    FROM users
+    WHERE EXISTS (
+        WITH users AS (
+            SELECT *
+            FROM dbt_test_gold.mart_sales
+        )
+        SELECT 1
+        FROM users
+    )
+    """
+
+    result = (
+        SQLSafetyValidator
+        .validate(
+            query,
+            analytics_catalog=(
+                _analytics_catalog()
+            ),
+        )
+    )
+
+    assert (
+        result.is_safe
+        is False
+    )
+
+    assert (
+        "schema-qualified"
+        in result.reason
+    )
