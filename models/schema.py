@@ -6,13 +6,30 @@ from pydantic import BaseModel, Field
 
 
 class AgentSchema(BaseModel):
-    messages: Annotated[list[AnyMessage], add_messages] = Field(default_factory=list)
+    messages: Annotated[
+        list[AnyMessage],
+        add_messages,
+    ] = Field(
+        default_factory=list
+    )
 
     user_question: str = ""
     curated_ques: str = ""
     prompt_query: str = ""
 
-    is_safe: Literal["YES", "NO"] = "NO"
+    # Exact governed catalog snapshot used
+    # for both prompting and validation.
+    analytics_catalog: dict[
+        str,
+        object,
+    ] = Field(
+        default_factory=dict
+    )
+
+    is_safe: Literal[
+        "YES",
+        "NO",
+    ] = "NO"
 
     generated_sql_query: str = ""
     comments: str = ""

@@ -491,8 +491,8 @@ class DatabaseUtil:
         target_schema: str,
     ) -> str:
         """
-        Serialize the governed analytics
-        catalog for LLM context.
+        Load and serialize the governed analytics
+        catalog.
         """
 
         catalog = (
@@ -503,10 +503,10 @@ class DatabaseUtil:
             )
         )
 
-        return json.dumps(
-            catalog,
-            indent=2,
-            ensure_ascii=False,
+        return (
+            self.serialize_analytics_catalog(
+                catalog
+            )
         )
 
     def execute_read_only(
@@ -597,6 +597,24 @@ class DatabaseUtil:
         finally:
 
             connection.close()
+
+    @staticmethod
+    def serialize_analytics_catalog(
+        catalog: dict,
+    ) -> str:
+        """
+        Serialize an already-loaded analytics
+        catalog for LLM context.
+
+        This does not perform another database
+        query.
+        """
+
+        return json.dumps(
+            catalog,
+            indent=2,
+            ensure_ascii=False,
+        )
 
 
 # ============================================================
