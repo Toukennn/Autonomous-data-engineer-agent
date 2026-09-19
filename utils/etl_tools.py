@@ -2052,43 +2052,124 @@ class ETLTools:
 
     def _merge_incremental_dataframe(
         self,
+        *,
+        dataset_name: str,
         existing_file: Path,
         new_dataframe: pd.DataFrame,
     ) -> pd.DataFrame:
         """
-        Merge newly extracted records with an existing dataset.
+        Merge newly extracted records with an existing
+        durable Bronze dataset.
 
         Safe additive schema evolution is supported:
 
         - newly added columns are accepted
-        - historical rows receive null values for new columns
+        - historical rows receive null values for
+        new columns
 
         Breaking changes are rejected:
 
         - removed columns
         - logical type changes
 
-        Exact duplicate rows are removed so retrying an extraction
-        after a checkpoint-write failure remains idempotent.
+        Merge semantics:
+
+        - without a business-key contract:
+        preserve the existing exact-row
+        idempotency behavior
+
+        - with a business-key contract:
+        the incoming batch replaces historical
+        rows having the same business key
+
+        Incoming batches may not contain duplicate
+        business keys because their internal ordering
+        is not a trusted row-version contract.
         """
 
-        if not existing_file.exists():
-            return new_dataframe.copy()
-
-        existing_dataframe = (
-            self._load_dataframe(
-                str(existing_file)
+        safe_dataset_name = (
+            validate_dataset_name(
+                dataset_name
             )
         )
 
-        # An empty API batch does not provide enough information to
-        # infer a schema change.
+        business_key_contract = (
+            self.business_key_contract_store
+            .load(
+                dataset_name=(
+                    safe_dataset_name
+                )
+            )
+        )
+
+        # ============================================================
+        # FIRST DURABLE BATCH
+        # ============================================================
+
+        if not existing_file.exists():
+
+            candidate = (
+                new_dataframe.copy()
+            )
+
+            if (
+                business_key_contract
+                is not None
+            ):
+                validate_business_key(
+                    dataframe=candidate,
+                    contract=(
+                        business_key_contract
+                    ),
+                )
+
+            return candidate
+
+        existing_dataframe = (
+            self._load_dataframe(
+                str(
+                    existing_file
+                )
+            )
+        )
+
+        # ============================================================
+        # EMPTY INCREMENTAL BATCH
+        # ============================================================
+        #
+        # No incoming rows means there is no new
+        # schema information.
+        #
+        # A keyed Bronze dataset must still satisfy
+        # its identity contract.
+        # ============================================================
+
         if new_dataframe.empty:
+
+            if (
+                business_key_contract
+                is not None
+            ):
+                validate_business_key(
+                    dataframe=(
+                        existing_dataframe
+                    ),
+                    contract=(
+                        business_key_contract
+                    ),
+                )
+
             return existing_dataframe
 
-        schema_diff = compare_schemas(
-            existing_dataframe=existing_dataframe,
-            incoming_dataframe=new_dataframe,
+        schema_diff = (
+            compare_schemas(
+                existing_dataframe=(
+                    existing_dataframe
+                ),
+                incoming_dataframe=(
+                    new_dataframe
+                ),
+            )
         )
 
         # ============================================================
@@ -2129,7 +2210,11 @@ class ETLTools:
                         new_type,
                     ),
                 )
-                in schema_diff.type_changes.items()
+                in (
+                    schema_diff
+                    .type_changes
+                    .items()
+                )
             }
 
             raise SchemaEvolutionError(
@@ -2142,16 +2227,20 @@ class ETLTools:
                 ),
                 details={
                     "existing_schema": (
-                        schema_diff.existing_schema
+                        schema_diff
+                        .existing_schema
                     ),
                     "incoming_schema": (
-                        schema_diff.incoming_schema
+                        schema_diff
+                        .incoming_schema
                     ),
                     "added_columns": list(
-                        schema_diff.added_columns
+                        schema_diff
+                        .added_columns
                     ),
                     "removed_columns": list(
-                        schema_diff.removed_columns
+                        schema_diff
+                        .removed_columns
                     ),
                     "type_changes": (
                         structured_type_changes
@@ -2170,26 +2259,56 @@ class ETLTools:
                 *schema_diff.added_columns,
             ]
 
-            # reindex automatically fills the newly introduced columns
-            # in historical rows with null values.
             existing_dataframe = (
                 existing_dataframe.reindex(
-                    columns=final_columns
+                    columns=(
+                        final_columns
+                    )
                 )
             )
 
             new_dataframe = (
                 new_dataframe.reindex(
-                    columns=final_columns
+                    columns=(
+                        final_columns
+                    )
                 )
             )
 
         else:
-            # No schema change.
-            # Preserve the durable dataset's column ordering.
-            new_dataframe = new_dataframe[
-                existing_dataframe.columns
-            ]
+
+            # Preserve the durable dataset's
+            # existing column ordering.
+
+            new_dataframe = (
+                new_dataframe[
+                    existing_dataframe.columns
+                ]
+            )
+
+        # ============================================================
+        # VALIDATE INCOMING BUSINESS KEYS
+        # ============================================================
+        #
+        # Reject duplicate keys INSIDE a new batch.
+        #
+        # We deliberately do not silently pick one of
+        # multiple incoming versions because no trusted
+        # ordering/version contract exists inside a batch.
+        # ============================================================
+
+        if (
+            business_key_contract
+            is not None
+        ):
+            validate_business_key(
+                dataframe=(
+                    new_dataframe
+                ),
+                contract=(
+                    business_key_contract
+                ),
+            )
 
         # ============================================================
         # MERGE
@@ -2204,18 +2323,64 @@ class ETLTools:
         )
 
         # ============================================================
-        # IDEMPOTENT RETRY PROTECTION
+        # IDEMPOTENCY / ROW IDENTITY
         # ============================================================
 
-        combined = (
-            combined
-            .drop_duplicates(
-                keep="last"
+        if (
+            business_key_contract
+            is not None
+        ):
+
+            key_columns = list(
+                business_key_contract.columns
             )
-            .reset_index(
-                drop=True
+
+            # Existing Bronze comes first and the
+            # new API batch comes second.
+            #
+            # Therefore keep="last" deterministically
+            # means the newly extracted version wins
+            # when the same business key already exists.
+
+            combined = (
+                combined
+                .drop_duplicates(
+                    subset=(
+                        key_columns
+                    ),
+                    keep="last",
+                )
+                .reset_index(
+                    drop=True
+                )
             )
-        )
+
+            # Defense in depth: the persisted candidate
+            # must satisfy the complete business-key
+            # contract before it can become durable.
+
+            validate_business_key(
+                dataframe=combined,
+                contract=(
+                    business_key_contract
+                ),
+            )
+
+        else:
+
+            # Backward-compatible behavior for
+            # datasets that have no business-key
+            # contract.
+
+            combined = (
+                combined
+                .drop_duplicates(
+                    keep="last"
+                )
+                .reset_index(
+                    drop=True
+                )
+            )
 
         return combined
             
@@ -2505,8 +2670,15 @@ class ETLTools:
             try:
                 dataframe = (
                     self._merge_incremental_dataframe(
-                        existing_file=output_file,
-                        new_dataframe=new_dataframe,
+                        dataset_name=(
+                            safe_dataset_name
+                        ),
+                        existing_file=(
+                            output_file
+                        ),
+                        new_dataframe=(
+                            new_dataframe
+                        ),
                     )
                 )
 

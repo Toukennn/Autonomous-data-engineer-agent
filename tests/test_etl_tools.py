@@ -789,6 +789,7 @@ def test_incremental_retry_does_not_duplicate_rows(
     result = (
         isolated_etl_tools
         ._merge_incremental_dataframe(
+            dataset_name="orders",
             existing_file=existing_file,
             new_dataframe=repeated_batch,
         )
@@ -801,6 +802,360 @@ def test_incremental_retry_does_not_duplicate_rows(
         101,
         102,
     ]
+
+
+def test_incremental_business_key_replaces_changed_row(
+    isolated_etl_tools,
+):
+    existing_file = (
+        isolated_etl_tools.data_root
+        / "orders"
+        / "extracted_data.csv"
+    )
+
+    existing = pd.DataFrame(
+        {
+            "id": [
+                1,
+                2,
+            ],
+            "name": [
+                "Alice",
+                "Bob",
+            ],
+        }
+    )
+
+    isolated_etl_tools\
+        ._save_dataframe(
+            dataframe=existing,
+            file_path=existing_file,
+            file_format="csv",
+        )
+
+    isolated_etl_tools\
+        .business_key_contract_store\
+        .save(
+            dataset_name="orders",
+            contract=(
+                BusinessKeyContract(
+                    columns=[
+                        "id"
+                    ]
+                )
+            ),
+        )
+
+    incoming = pd.DataFrame(
+        {
+            "id": [
+                1,
+                3,
+            ],
+            "name": [
+                "Alicia",
+                "Charlie",
+            ],
+        }
+    )
+
+    result = (
+        isolated_etl_tools
+        ._merge_incremental_dataframe(
+            dataset_name="orders",
+            existing_file=(
+                existing_file
+            ),
+            new_dataframe=(
+                incoming
+            ),
+        )
+    )
+
+    ordered = (
+        result
+        .sort_values(
+            "id"
+        )
+        .reset_index(
+            drop=True
+        )
+    )
+
+    assert (
+        list(
+            ordered["id"]
+        )
+        == [
+            1,
+            2,
+            3,
+        ]
+    )
+
+    assert (
+        list(
+            ordered["name"]
+        )
+        == [
+            "Alicia",
+            "Bob",
+            "Charlie",
+        ]
+    )
+
+    assert (
+        ordered["id"]
+        .duplicated()
+        .sum()
+        == 0
+    )
+
+
+def test_incremental_without_business_key_keeps_exact_row_behavior(
+    isolated_etl_tools,
+):
+    existing_file = (
+        isolated_etl_tools.data_root
+        / "orders"
+        / "extracted_data.csv"
+    )
+
+    existing = pd.DataFrame(
+        {
+            "id": [
+                1
+            ],
+            "name": [
+                "Alice"
+            ],
+        }
+    )
+
+    isolated_etl_tools\
+        ._save_dataframe(
+            dataframe=existing,
+            file_path=existing_file,
+            file_format="csv",
+        )
+
+    incoming = pd.DataFrame(
+        {
+            "id": [
+                1
+            ],
+            "name": [
+                "Alicia"
+            ],
+        }
+    )
+
+    result = (
+        isolated_etl_tools
+        ._merge_incremental_dataframe(
+            dataset_name="orders",
+            existing_file=(
+                existing_file
+            ),
+            new_dataframe=(
+                incoming
+            ),
+        )
+    )
+
+    # Without a business-key contract,
+    # the two rows are distinct exact rows.
+    assert (
+        len(
+            result
+        )
+        == 2
+    )
+
+
+def test_incremental_business_key_rejects_duplicate_incoming_batch(
+    isolated_etl_tools,
+):
+    existing_file = (
+        isolated_etl_tools.data_root
+        / "orders"
+        / "extracted_data.csv"
+    )
+
+    existing = pd.DataFrame(
+        {
+            "id": [
+                1
+            ],
+            "name": [
+                "Alice"
+            ],
+        }
+    )
+
+    isolated_etl_tools\
+        ._save_dataframe(
+            dataframe=existing,
+            file_path=existing_file,
+            file_format="csv",
+        )
+
+    isolated_etl_tools\
+        .business_key_contract_store\
+        .save(
+            dataset_name="orders",
+            contract=(
+                BusinessKeyContract(
+                    columns=[
+                        "id"
+                    ]
+                )
+            ),
+        )
+
+    incoming = pd.DataFrame(
+        {
+            "id": [
+                2,
+                2,
+            ],
+            "name": [
+                "first",
+                "second",
+            ],
+        }
+    )
+
+    with pytest.raises(
+        DatasetError,
+        match="duplicate",
+    ):
+        (
+            isolated_etl_tools
+            ._merge_incremental_dataframe(
+                dataset_name="orders",
+                existing_file=(
+                    existing_file
+                ),
+                new_dataframe=(
+                    incoming
+                ),
+            )
+        )
+
+
+def test_incremental_business_key_retry_is_idempotent(
+    isolated_etl_tools,
+):
+    existing_file = (
+        isolated_etl_tools.data_root
+        / "orders"
+        / "extracted_data.csv"
+    )
+
+    existing = pd.DataFrame(
+        {
+            "id": [
+                1
+            ],
+            "name": [
+                "Alice"
+            ],
+        }
+    )
+
+    isolated_etl_tools\
+        ._save_dataframe(
+            dataframe=existing,
+            file_path=existing_file,
+            file_format="csv",
+        )
+
+    isolated_etl_tools\
+        .business_key_contract_store\
+        .save(
+            dataset_name="orders",
+            contract=(
+                BusinessKeyContract(
+                    columns=[
+                        "id"
+                    ]
+                )
+            ),
+        )
+
+    incoming = pd.DataFrame(
+        {
+            "id": [
+                1,
+                2,
+            ],
+            "name": [
+                "Alicia",
+                "Bob",
+            ],
+        }
+    )
+
+    first = (
+        isolated_etl_tools
+        ._merge_incremental_dataframe(
+            dataset_name="orders",
+            existing_file=(
+                existing_file
+            ),
+            new_dataframe=(
+                incoming
+            ),
+        )
+    )
+
+    isolated_etl_tools\
+        ._save_dataframe(
+            dataframe=first,
+            file_path=existing_file,
+            file_format="csv",
+        )
+
+    second = (
+        isolated_etl_tools
+        ._merge_incremental_dataframe(
+            dataset_name="orders",
+            existing_file=(
+                existing_file
+            ),
+            new_dataframe=(
+                incoming
+            ),
+        )
+    )
+
+    ordered = (
+        second
+        .sort_values(
+            "id"
+        )
+        .reset_index(
+            drop=True
+        )
+    )
+
+    assert (
+        len(
+            ordered
+        )
+        == 2
+    )
+
+    assert (
+        list(
+            ordered["name"]
+        )
+        == [
+            "Alicia",
+            "Bob",
+        ]
+    )
 
 
 def test_incomplete_incremental_configuration_is_rejected(
@@ -969,6 +1324,7 @@ def test_incremental_additive_schema_change_is_accepted(
     result = (
         isolated_etl_tools
         ._merge_incremental_dataframe(
+            dataset_name="orders",
             existing_file=existing_file,
             new_dataframe=incoming,
         )
@@ -1048,6 +1404,7 @@ def test_removed_column_is_still_rejected(
         (
             isolated_etl_tools
             ._merge_incremental_dataframe(
+                dataset_name="orders",
                 existing_file=existing_file,
                 new_dataframe=incoming,
             )
@@ -1094,6 +1451,7 @@ def test_type_change_is_still_rejected(
         (
             isolated_etl_tools
             ._merge_incremental_dataframe(
+                dataset_name="orders",
                 existing_file=existing_file,
                 new_dataframe=incoming,
             )
@@ -1145,6 +1503,7 @@ def test_additive_schema_retry_remains_idempotent(
     first_merge = (
         isolated_etl_tools
         ._merge_incremental_dataframe(
+            dataset_name="orders",
             existing_file=existing_file,
             new_dataframe=incoming,
         )
@@ -1159,6 +1518,7 @@ def test_additive_schema_retry_remains_idempotent(
     second_merge = (
         isolated_etl_tools
         ._merge_incremental_dataframe(
+            dataset_name="orders",
             existing_file=existing_file,
             new_dataframe=incoming,
         )
