@@ -1,12 +1,12 @@
 # Autonomous Data Engineer Agent
 
-A safety-oriented agentic data engineering system for **API ingestion**, **deterministic ETL workflows**, **Medallion architecture**, **PostgreSQL warehousing**, **dbt transformations**, **data-quality contracts**, **lineage**, **runtime observability**, and **natural-language SQL analytics**.
+A safety-oriented agentic data engineering system for **API ingestion**, **deterministic ETL workflows**, **Medallion architecture**, **PostgreSQL warehousing**, **dbt transformations**, **data-quality contracts**, **lineage**, **runtime observability**, and **governed natural-language SQL analytics**.
 
-The project uses LangGraph to route user requests to specialized ETL and SQL agents while keeping sensitive operations under deterministic application control.
+The project uses LangGraph to route requests to specialized ETL and SQL agents while keeping sensitive operations under deterministic application control.
 
 > **LLMs decide what should happen. Deterministic tools decide how it happens.**
 
-The LLM may select a supported workflow and create typed transformation or quality plans, but it does not receive arbitrary Python execution, arbitrary filesystem access, direct checkpoint control, schema-policy control, lineage-write control, quality-gate bypass control, unrestricted dbt execution, or unrestricted SQL execution.
+The LLM may choose a supported workflow and create typed transformation or quality plans, but it does not receive arbitrary Python execution, arbitrary filesystem access, direct checkpoint control, schema-policy control, unrestricted dbt execution, or unrestricted database access.
 
 ---
 
@@ -15,10 +15,10 @@ The LLM may select a supported workflow and create typed transformation or quali
 The system contains three main agents:
 
 - **Data Engineer Agent** — routes requests to the correct specialist.
-- **ETL Analyst Agent** — orchestrates bounded API → Bronze → Silver → Gold workflows, including both the legacy Pandas/file-backed path and the PostgreSQL/dbt path.
-- **SQL Analyst Agent** — converts natural-language questions into PostgreSQL queries and safely executes read-only analytics.
+- **ETL Analyst Agent** — orchestrates bounded API → Bronze → Silver → Gold workflows using either the file-backed Pandas path or the PostgreSQL/dbt path.
+- **SQL Analyst Agent** — converts natural-language analytical questions into governed, read-only PostgreSQL queries against approved Silver/Gold warehouse relations.
 
-The warehouse-backed dbt path is:
+The warehouse-backed path is:
 
 ```text
 External API
@@ -41,49 +41,89 @@ Silver views     Gold marts
     ├──── dbt tests ───┤
     │                  │
     └──── lineage / observability
+                       │
+                       ▼
+              governed analytics catalog
+                       │
+                       ▼
+                  SQL Analyst
+                       │
+                       ▼
+              SQLGlot AST validation
+                       │
+                       ▼
+             read-only PostgreSQL
+                       │
+                       ▼
+                analytical answer
 ```
 
 At a higher level:
 
 ```text
-                              User Request
-                                   │
-                                   ▼
-                         Data Engineer Router
-                         ┌─────────┴─────────┐
-                         ▼                   ▼
-                    ETL Analyst          SQL Analyst
-                         │                   │
-                         │                   ▼
-                         │              SQL generation
-                         │                   │
-                         │                   ▼
-                         │              SQLGlot AST
-                         │              validation
-                         │                   │
-                         │                   ▼
-                         │              read-only
-                         │              PostgreSQL
-                         │
-                         ▼
-                    ETL orchestration
-                         │
-          ┌──────────────┴──────────────┐
-          ▼                             ▼
-   file-backed path                dbt path
-          │                             │
-    Bronze → Silver → Gold       Bronze filesystem
-                                      ↓
-                                 bronze PostgreSQL
-                                      ↓
-                                   dbt Silver
-                                      ↓
-                                   dbt Gold
-                                      │
-                              quality / artifacts
-                                      │
-                         lineage + execution records
+                               User Request
+                                    │
+                                    ▼
+                          Data Engineer Router
+                          ┌─────────┴─────────┐
+                          ▼                   ▼
+                     ETL Analyst          SQL Analyst
+                          │                   │
+             ┌────────────┴────────────┐      │
+             ▼                         ▼      ▼
+      file-backed path              dbt path  governed catalog
+             │                         │      │
+      Bronze → Silver → Gold       Bronze FS │
+                                       ↓     │
+                                  PostgreSQL │
+                                       ↓     │
+                                   dbt Silver│
+                                       ↓     │
+                                    dbt Gold │
+                                       │     │
+                               quality/tests │
+                                       │     │
+                          lineage/observability
+                                             │
+                                             ▼
+                                     SQL generation
+                                             │
+                                             ▼
+                                      SQLGlot AST
+                                             │
+                                             ▼
+                                  relation/schema allowlist
+                                             │
+                                             ▼
+                                   read-only execution
 ```
+
+---
+
+# Core Design Principle
+
+The project deliberately separates **planning** from **execution**.
+
+```text
+LLM:
+    decides WHAT should happen
+
+Deterministic application code:
+    decides HOW it may happen
+```
+
+Examples:
+
+- the LLM may request a supported transformation operation
+- deterministic code validates the typed plan and compiles it
+- the LLM may generate analytical SQL
+- deterministic SQLGlot validation decides whether it may execute
+- the LLM may describe a quality requirement
+- deterministic quality code decides pass/fail
+- the LLM may name a logical dataset
+- application code controls physical paths, schemas, model names, selectors, credentials, and execution boundaries
+
+The system treats all LLM output as untrusted input.
 
 ---
 
@@ -103,7 +143,7 @@ or:
 sql
 ```
 
-and delegates execution to the corresponding specialist.
+and delegates it to the corresponding specialist.
 
 ![Data Engineer Graph](data_engineer_graph.png)
 
@@ -113,7 +153,7 @@ The router does not execute ETL or SQL itself.
 
 ## ETL Agent
 
-The ETL agent is a ReAct-style orchestrator with a deliberately small tool surface.
+The ETL agent is a bounded ReAct-style orchestrator with a deliberately small tool surface.
 
 It currently exposes six tools:
 
@@ -125,8 +165,6 @@ dbt_bronze_to_silver_tool
 dbt_silver_to_gold_tool
 configure_quality_contract_tool
 ```
-
-The agent can therefore choose between two supported Medallion execution paths.
 
 ### File-backed deterministic path
 
@@ -177,32 +215,74 @@ dbt Gold
 
 The agent cannot directly choose:
 
-- arbitrary input or output filesystem paths
+- arbitrary input/output filesystem paths
 - arbitrary PostgreSQL schemas or physical table names
 - direct Bronze → Gold transitions
-- unrestricted Python code
-- arbitrary SQL or Jinja
+- arbitrary Python code
+- arbitrary SQL or Jinja for dbt model generation
 - arbitrary dbt selectors or CLI arguments
 - dbt project/profile paths
 - database credentials
 - quality-check bypasses
 - direct mutation or weakening of an existing quality contract
 
-For multi-stage requests, execution occurs sequentially so every stage is validated before the next dependent stage begins.
-
-A required tool failure stops the workflow deterministically. The LLM is not allowed to continue to a dependent downstream stage after failure.
+For dependent multi-stage requests, execution is sequential. A failed required stage stops the workflow before downstream stages run.
 
 ![ETL Analyst Graph](etl_analyst_graph.png)
 
 ---
 
-## Planner LLM vs Deterministic Executor
+## SQL Analyst
 
-Transformation planning and execution are intentionally separated.
+The SQL Analyst is a governed analytical interface over approved dbt Silver and Gold relations.
 
-### File-backed Transformation Planner
+Its current flow is:
 
-The planner receives the user transformation request plus dataset context and returns a validated Pydantic `TransformPlan`.
+```text
+natural-language question
+        ↓
+question curation
+        ↓
+load one governed analytics catalog snapshot
+        ↓
+build SQL-generation prompt from that snapshot
+        ↓
+LLM generates one PostgreSQL query
+        ↓
+SQLGlot AST validation
+        ↓
+scope-aware relation/schema allowlisting
+        │
+        ├── reject → no execution
+        │
+        └── accept
+                ↓
+        read-only PostgreSQL
+                ↓
+        bounded result set
+                ↓
+        natural-language answer
+```
+
+The same in-memory catalog snapshot is used for both:
+
+```text
+LLM prompt context
+        =
+deterministic SQL validation
+```
+
+This avoids prompt-time / validation-time catalog drift within one SQL-agent run.
+
+![SQL Analyst Graph](sql_analyst_graph.png)
+
+---
+
+# Planner LLM vs Deterministic Executor
+
+## File-backed Transformation Planner
+
+The planner receives the user request plus dataset metadata and returns a validated Pydantic `TransformPlan`.
 
 Supported operations include:
 
@@ -216,13 +296,13 @@ Supported operations include:
 - string transformations
 - grouped aggregations
 
-Trusted Python code in `ETLTools` controls how the plan is executed.
+Trusted Python code in `ETLTools` controls execution.
 
-### dbt Transformation Planner
+## dbt Transformation Planner
 
-Warehouse-backed Silver and Gold transformations use a separate typed `DBTTransformPlan`.
+Warehouse-backed transformations use a separate typed `DBTTransformPlan`.
 
-The planner may choose supported logical operations such as:
+Supported logical operations include:
 
 ```text
 select_columns
@@ -234,9 +314,7 @@ string_transform
 groupby_aggregate
 ```
 
-The planner does **not** write SQL.
-
-Instead:
+The planner does **not** write arbitrary SQL.
 
 ```text
 User request
@@ -247,20 +325,18 @@ validated DBTTransformPlan
     ↓
 deterministic DBTSQLCompiler
     ↓
-validated PostgreSQL/dbt SQL
+SQLGlot validation
     ↓
 generated dbt model
 ```
 
 Silver plans do not allow aggregation. Gold plans may use supported aggregation operations.
 
-The dbt compiler owns quoting, literal encoding, relation resolution, column validation, operation order, and SQLGlot validation before generated SQL is written.
+## Data-Quality Planner
 
-### Data-Quality Planner
+When the user explicitly requests quality requirements, a planner creates a validated `DataQualityContract`.
 
-When a user explicitly requests quality expectations, a dedicated planner creates a validated `DataQualityContract`.
-
-Supported quality rules currently include:
+Supported rules currently include:
 
 ```text
 not_null
@@ -270,80 +346,40 @@ range
 row_count
 ```
 
-The planner is instructed not to invent quality requirements. Contract identity and version remain application-controlled.
-
-There is no arbitrary `exec(...)`, unrestricted generated Python, unrestricted generated SQL execution, or unrestricted dbt command execution.
+The planner is instructed not to invent quality constraints.
 
 ---
 
 # Phase 2A — Reliable API Ingestion ✅
 
-Phase 2A moved HTTP behavior out of the agent layer and into a deterministic `APIClient`.
+Phase 2A moved HTTP behavior out of the agent layer into a deterministic `APIClient`.
 
-## 2A.1 — Dedicated API Client
-
-`utils/api_client.py` owns API communication and returns an `APIExtractionResult` containing records and metadata.
-
-Important behavior includes:
+Implemented capabilities include:
 
 - top-level JSON arrays
 - nested record paths
-- relative pagination URLs
 - controlled JSON validation
+- retries and exponential backoff
+- `Retry-After`
+- handling of `429` and transient `5xx` responses
+- token authentication
+- configurable auth header/scheme
+- configurable user agent
+- response/page/record limits
+- pagination-loop detection
+- redirect limits
 - normalized external API errors
-- metadata independent from agent reasoning
-
-## 2A.2 — Retry, Backoff, Rate Limits, and Authentication
-
-The API client supports bounded retries for transient failures such as `429`, `500`, `502`, `503`, and `504`.
-
-It also supports exponential backoff, `Retry-After`, token authentication, configurable auth header/scheme, configurable user agent, and redirect limits.
+- SSRF/public-destination validation
+- redirect destination validation
+- restricted authenticated cross-origin redirects
 
 Authenticated requests must use HTTPS.
-
-## 2A.3 — Bounded Extraction
-
-Extraction is bounded by:
-
-- request timeout
-- maximum response bytes
-- maximum total bytes across pagination
-- maximum pages
-- maximum records
-- maximum redirects
-- pagination-loop detection
-
-## 2A.4 — SSRF and Redirect Hardening
-
-Destination validation rejects unsafe targets including localhost, loopback, private, link-local, unspecified, multicast, and other non-public destinations.
-
-Redirect destinations are validated before being followed, and authenticated cross-origin behavior is restricted.
 
 ---
 
 # Phase 2B — Persistent Incremental Ingestion ✅
 
-Phase 2B introduced durable watermark-based ingestion while preserving:
-
-> **Checkpoint state belongs to deterministic code, not the LLM.**
-
-## 2B.1 — Persistent Checkpoint Store
-
-`utils/incremental_state.py` implements `IncrementalStateStore` under `data/_state/`.
-
-The store provides restricted state keys, containment checks, atomic JSON persistence, controlled corrupted-state handling, and UTC timestamps.
-
-## 2B.2 — Watermark-Aware Extraction
-
-Incremental extraction uses:
-
-```text
-watermark_param
-watermark_field
-watermark_value
-```
-
-Ownership is intentionally split:
+Phase 2B introduced durable watermark-based ingestion.
 
 ```text
 LLM chooses:
@@ -351,27 +387,29 @@ LLM chooses:
     watermark_param
     watermark_field
 
-Deterministic code loads/calculates:
-    watermark_value
+Deterministic code controls:
+    previous watermark_value
+    checkpoint loading
+    checkpoint advancement
 ```
 
-The LLM never supplies the previous cursor value.
+`utils/incremental_state.py` persists checkpoints under:
 
-## 2B.3 — Atomic and Idempotent Persistence
+```text
+data/_state/
+```
 
-Retry safety currently uses exact-row deduplication. The checkpoint advances only after required durable writes succeed.
+Retry safety currently uses exact-row deduplication.
 
-## 2B.4 — Agent-Safe Incremental Configuration
+The checkpoint advances only after the required durable writes succeed.
 
-Checkpoint metadata binds state to its source and incremental configuration so a state key cannot silently be reused for a different pipeline.
+Checkpoint metadata binds state to the source/configuration so one state key cannot silently be reused for a different incremental pipeline.
 
 ---
 
 # Phase 2C — Schema Evolution ✅
 
-Phase 2C added deterministic schema comparison, safe additive evolution, schema history, and durable breaking-change reports.
-
-The source-ingestion policy is:
+Source schema transitions are decided deterministically:
 
 ```text
 same schema                 → ACCEPT
@@ -380,27 +418,17 @@ removed columns             → REJECT
 logical type changes        → REJECT
 ```
 
-The LLM does not decide whether a source schema transition is compatible.
+Implemented features include:
 
-## 2C.1 — Schema Drift Detection
+- schema drift detection
+- additive schema evolution
+- logical dtype normalization
+- schema fingerprints
+- schema history
+- breaking-change rejection reports
+- stable rejection fingerprints
 
-`utils/schema_evolution.py` compares logical schemas and records added columns, removed columns, and type changes.
-
-Pandas dtypes are normalized to `boolean`, `number`, `datetime`, `string`, and `object`.
-
-## 2C.2 — Additive Evolution
-
-New columns are accepted safely. Historical rows receive nulls for newly introduced columns while existing column order is preserved.
-
-## 2C.3 — Schema History and Fingerprints
-
-Each Bronze dataset can maintain `schema_history.json` with stable SHA-256 schema fingerprints and monotonically increasing schema versions.
-
-## 2C.4 — Breaking-Change Rejection
-
-Breaking transitions raise `SchemaEvolutionError` and are persisted to `schema_change_rejections.json`.
-
-Repeated identical breaking transitions use stable rejection fingerprints so duplicate rejection events are avoided.
+Bronze schema history is persisted with the dataset.
 
 ---
 
@@ -413,7 +441,7 @@ Repeated identical breaking transitions use stable rejection fingerprints so dup
 2D.4  Agent integration + lineage         ✅
 ```
 
-The original deterministic Medallion architecture is:
+The file-backed Medallion path is:
 
 ```text
 External API
@@ -425,31 +453,17 @@ External API
   Gold
 ```
 
-## 2D.1 — Deterministic Bronze Layer
-
-`utils/data_layers.py` defines explicit `bronze`, `silver`, and `gold` layers.
-
-The agent chooses logical identifiers such as `orders`, `customers`, and `pokemon`, not physical paths.
-
-Bronze outputs are stored under:
+## Bronze
 
 ```text
 data/bronze/<dataset>/
     extracted_data.<format>
     extraction_metadata.json
     schema_history.json
-    schema_change_rejections.json   # when needed
+    schema_change_rejections.json   # when required
 ```
 
-If an incremental checkpoint exists but the corresponding Bronze dataset is missing, ingestion is rejected to prevent historical data from being skipped.
-
-## 2D.2 — Silver Transformation Layer
-
-Silver consumes Bronze only.
-
-`_resolve_layer_dataset_file()` resolves exactly one physical dataset file for a logical dataset and rejects missing or ambiguous multi-format states.
-
-Silver outputs are stored under:
+## Silver
 
 ```text
 data/silver/<dataset>/
@@ -457,11 +471,9 @@ data/silver/<dataset>/
     transformation_metadata.json
 ```
 
-## 2D.3 — Gold Curated / Analytics Layer
+Silver consumes Bronze only.
 
-Gold consumes Silver only.
-
-Gold outputs are stored under:
+## Gold
 
 ```text
 data/gold/<dataset>/
@@ -469,33 +481,31 @@ data/gold/<dataset>/
     curation_metadata.json
 ```
 
-Gold is intended for curated analytical outputs, KPIs, business filters, aggregations, and reporting tables.
+Gold consumes Silver only.
 
-## 2D.4 — Deterministic Lineage
+## Lineage
 
-`utils/lineage.py` implements `LineageStore` under:
+`utils/lineage.py` persists deterministic lineage under:
 
 ```text
 data/_lineage/lineage.json
 ```
 
-Lineage is written by deterministic application code, never directly by the LLM.
-
-The original Medallion events are:
+Lineage events include:
 
 ```text
 extract
 transform
 curate
+warehouse_sync
+dbt_build
 ```
 
-Later phases extend lineage with warehouse synchronization and dbt build events.
+Lineage is written by deterministic application code, not by the LLM.
 
 ---
 
 # Phase 2E — Agent Runtime Reliability, Observability, and CI ✅
-
-Phase 2E moved reliability guarantees above the deterministic ETL engine and into the agent runtime itself.
 
 ```text
 2E.1  Deterministic agent orchestration tests   ✅
@@ -513,25 +523,23 @@ workflow_failed
 failure_reason
 ```
 
-A single LLM response may not execute multiple dependent ETL stages at once.
+`ETL_MAX_TOOL_CALLS` bounds tool execution in one ETL-agent run.
 
-`ETL_MAX_TOOL_CALLS` bounds the number of tool executions in one ETL-agent run.
-
-The default is:
+Default:
 
 ```text
 ETL_MAX_TOOL_CALLS=8
 ```
 
-`utils/execution_observability.py` implements `ExecutionRunStore` under:
+`ExecutionRunStore` persists structured run records under:
 
 ```text
 data/_runs/
 ```
 
-Tool events use allowlisted operational metadata. Raw user transformation prompts, raw quality requirements, and raw API URLs are deliberately excluded from execution logs.
+Execution events use allowlisted operational metadata rather than raw prompts or unrestricted tool payloads.
 
-`.github/workflows/ci.yml` runs Ruff, pytest, and package build checks on pushes to `main` and pull requests targeting `main`.
+GitHub Actions runs Ruff, pytest, and package build checks.
 
 ---
 
@@ -545,19 +553,9 @@ Tool events use allowlisted operational metadata. Raw user transformation prompt
 2F.5  Quality observability + lineage linkage  ✅
 ```
 
-The core principle is:
+Core principle:
 
 > **The LLM may describe what quality is expected. Deterministic code decides whether the data passes.**
-
-Supported rules are:
-
-```text
-not_null
-unique
-accepted_values
-range
-row_count
-```
 
 Contracts are stored under:
 
@@ -565,17 +563,28 @@ Contracts are stored under:
 data/_contracts/<layer>/<dataset>.json
 ```
 
-File-backed Silver and Gold evaluate candidate DataFrames before durable replacement. Failed quality gates preserve the last known-good output.
+For file-backed Silver/Gold:
 
-The agent exposes `configure_quality_contract_tool` only when the user explicitly specifies quality expectations.
+```text
+candidate dataframe
+        ↓
+quality contract
+        ↓
+deterministic evaluation
+   ┌────┴────┐
+   ▼         ▼
+ reject     pass
+   │         │
+ preserve    atomic promotion
+ last good
+ output
+```
 
-Phase 2H later synchronizes the same contract model into dbt tests for warehouse-backed Silver and Gold models.
+Phase 2H synchronizes the same contract model into dbt tests for warehouse-backed datasets.
 
 ---
 
 # Phase 2G — PostgreSQL Warehouse Bridge ✅
-
-Phase 2G introduced the deterministic bridge between file-backed Bronze ingestion and warehouse-backed dbt execution.
 
 ```text
 2G.1  Deterministic PostgreSQL writer       ✅
@@ -583,60 +592,29 @@ Phase 2G introduced the deterministic bridge between file-backed Bronze ingestio
 2G.3  Warehouse metadata + lineage          ✅
 ```
 
-The resulting boundary is:
-
-```text
-External API
-    ↓
-deterministic Bronze ingestion
-    ↓
-data/bronze/<dataset>/
-    ↓
-PostgresWarehouseLoader
-    ↓
-bronze.<dataset>
-```
-
-## 2G.1 — Deterministic PostgreSQL Writer
-
 `utils/warehouse.py` implements `PostgresWarehouseLoader`.
 
 Important controls include:
 
-- fixed application-controlled Bronze schema
+- application-controlled `bronze` schema
 - logical dataset-name validation
 - PostgreSQL 63-byte identifier guards
 - quoted identifiers via Psycopg
 - deterministic Pandas → PostgreSQL type mapping
-- transaction-based writes
+- transactional writes
 - rollback on failure
 - normalized warehouse exceptions
 
-The LLM never supplies a physical PostgreSQL schema or arbitrary table identifier.
+The LLM never chooses the physical Bronze schema.
 
-## 2G.2 — Bronze Dataset → PostgreSQL
+## Dependency-safe refresh
 
-`ETLTools.load_bronze_to_warehouse()`:
-
-1. validates the logical dataset name
-2. resolves the application-controlled Bronze file
-3. loads the persisted Bronze DataFrame
-4. computes schema metadata/fingerprints
-5. writes the dataset into `bronze.<dataset>`
-6. persists warehouse synchronization metadata
-
-Warehouse connectivity is lazy, so constructing `ETLTools` does not require database connectivity when the current operation does not need PostgreSQL.
-
-## 2G.3 — Dependency-Safe In-Place Refresh
-
-The original warehouse bridge used drop-and-recreate semantics. Once dbt views depended on Bronze tables, that would break persistent dependencies.
-
-The refresh strategy was therefore hardened to preserve relation identity:
+Existing Bronze tables are refreshed in place:
 
 ```text
-existing bronze table
+inspect existing table
       ↓
-inspect physical columns
+validate physical schema
       ↓
 add allowed new columns
       ↓
@@ -647,65 +625,19 @@ INSERT refreshed rows
 COMMIT
 ```
 
-The loader does **not** use `DROP TABLE ... CASCADE`.
+The loader does **not** use `DROP TABLE ... CASCADE`, preserving downstream dbt dependencies.
 
-This allows an existing relation such as:
-
-```text
-bronze.pokemon
-      ↑
-dbt_dev_silver.stg_pokemon
-```
-
-to survive subsequent Bronze refreshes.
-
-The warehouse refresh follows the same additive-only schema philosophy as source schema evolution:
-
-- newly added columns may be added to PostgreSQL
-- destructive column removal is rejected
-- unsafe physical type mutation is rejected
-
-Warehouse metadata records:
-
-```text
-load_mode = refresh_in_place
-```
-
-rather than destructive replacement semantics.
-
-## Warehouse Synchronization Metadata and Lineage
-
-Successful Bronze warehouse synchronization persists:
+Successful sync persists:
 
 ```text
 data/bronze/<dataset>/warehouse_sync_metadata.json
 ```
 
-The ordering is:
-
-```text
-PostgreSQL commit
-      ↓
-warehouse_sync_metadata.json
-      ↓
-refresh generated dbt Bronze sources
-      ↓
-warehouse_sync lineage
-```
-
-`LineageStore` supports the additional event:
-
-```text
-warehouse_sync
-```
-
-The repository also includes `inspect_warehouse.py`, a local helper for listing Bronze/Silver/Gold relations and inspecting sample rows in PostgreSQL.
+and then refreshes the generated dbt source registry and records `warehouse_sync` lineage.
 
 ---
 
 # Phase 2H — dbt Integration ✅
-
-Phase 2H turns the PostgreSQL warehouse bridge into a bounded, typed, agent-controlled dbt transformation system.
 
 ```text
 2H.1  dbt project + PostgreSQL adapter        ✅
@@ -718,118 +650,77 @@ Phase 2H turns the PostgreSQL warehouse bridge into a bounded, typed, agent-cont
 2H.8  dbt artifacts → lineage/observability   ✅
 ```
 
-The implemented dbt architecture is:
+The implemented dbt path is:
 
 ```text
-External API
-    ↓
-Python deterministic ingestion
-    ↓
 Bronze filesystem
-    ↓
-PostgreSQL bronze schema
-    ↓
-generated dbt sources
-    ↓
+      ↓
+PostgreSQL Bronze
+      ↓
+generated dbt source registry
+      ↓
 DBTTransformPlan
-    ↓
-deterministic DBTSQLCompiler
-    ↓
-generated dbt Silver / Gold models
-    ↓
+      ↓
+DBTSQLCompiler
+      ↓
+generated Silver / Gold models
+      ↓
 dbt build
-    ↓
+      ↓
 dbt tests
-    ↓
+      ↓
 manifest.json + run_results.json
-    ↓
+      ↓
 lineage + execution observability
 ```
 
-## 2H.1 — dbt Project and PostgreSQL Adapter
+## Dynamic Bronze sources
 
-The repository contains an application-controlled dbt project under:
-
-```text
-dbt/
-├── dbt_project.yml
-├── profiles.yml
-├── models/
-└── tests/
-```
-
-The PostgreSQL profile is environment-driven.
-
-Runtime settings include:
-
-```env
-DBT_TARGET_SCHEMA=dbt_dev
-DBT_THREADS=4
-```
-
-## 2H.2 — Dynamic Bronze dbt Sources
-
-`utils/dbt_sources.py` implements `DBTSourceRegistry`.
-
-The registry discovers only successfully warehouse-synchronized Bronze datasets and generates:
+`DBTSourceRegistry` generates:
 
 ```text
 dbt/models/sources/bronze_sources.yml
 ```
 
-Source generation is deterministic and application-controlled.
+from successfully warehouse-synchronized Bronze datasets.
 
-The LLM cannot invent a physical Bronze source or path.
+## Silver models
 
-## 2H.3 — Silver dbt Models
-
-`utils/dbt_models.py` implements `DBTSilverModelManager`.
-
-Generated models are written under:
-
-```text
-dbt/models/staging/generated/
-```
-
-and use application-controlled names such as:
+Generated Silver models use names such as:
 
 ```text
 stg_<dataset>
 ```
 
-With the default target schema, Silver models are materialized as views under:
+and are materialized as views in:
 
 ```text
 dbt_dev_silver
 ```
 
-## 2H.4 — Gold dbt Marts
+with the default target schema.
 
-`DBTGoldModelManager` generates Gold models under:
+## Gold marts
 
-```text
-dbt/models/marts/generated/
-```
-
-with names such as:
+Generated Gold models use names such as:
 
 ```text
 mart_<dataset>
 ```
 
-Gold requires a valid existing Silver dbt model plus persisted model metadata.
-
-With the default target schema, Gold relations are materialized as tables under:
+and are materialized as tables in:
 
 ```text
 dbt_dev_gold
 ```
 
-## 2H.5 — dbt Tests and Quality Governance
+Gold generation requires an existing governed Silver dbt model and its persisted metadata.
 
-`utils/dbt_quality.py` synchronizes existing `DataQualityContract` objects into dbt tests.
+## dbt quality tests
 
-Supported mappings include:
+Quality contracts are deterministically translated into dbt tests.
+
+Mappings include:
 
 ```text
 NotNull        → dbt not_null
@@ -845,15 +736,9 @@ Custom generic tests live under:
 dbt/tests/generic/quality_contract_tests.sql
 ```
 
-This preserves the original governance principle:
+## Bounded dbt execution
 
-> **The LLM may describe the quality requirement. Deterministic code decides the contract and dbt decides pass/fail at execution time.**
-
-## 2H.6 — Bounded dbt Execution
-
-`utils/dbt_execution.py` implements `DBTExecutor`.
-
-The executor owns:
+`DBTExecutor` controls:
 
 - project directory
 - profiles directory
@@ -861,107 +746,14 @@ The executor owns:
 - target schema
 - thread count
 - model-file validation
-- application-controlled selectors
+- selectors
 - execution locking
-- `dbtRunner` invocation
+- `dbtRunner`
 - exception normalization
 
-Silver uses an exact model selector.
+The LLM cannot choose arbitrary dbt CLI arguments or selectors.
 
-Gold uses an ancestor-inclusive selector such as:
-
-```text
-+mart_orders
-```
-
-The LLM cannot supply arbitrary dbt CLI arguments or selectors.
-
-## 2H.7 — Typed dbt Planning and Model Metadata
-
-### DBTTransformPlan
-
-`models/schema.py` defines a dbt-specific typed transformation plan.
-
-The LLM chooses only supported operations. It does not generate arbitrary SQL, Jinja, shell commands, filesystem paths, profiles, selectors, or credentials.
-
-### Deterministic SQL Compiler
-
-`utils/dbt_sql.py` implements `DBTSQLCompiler`.
-
-The compiler validates:
-
-- input/output columns
-- PostgreSQL identifier limits
-- quoted identifiers
-- supported literal types
-- finite numeric literals
-- filter semantics
-- casts
-- string transforms
-- supported aggregations
-- Bronze source references
-- Silver model references
-- operation ordering
-
-Generated SQL is validated with SQLGlot before model persistence.
-
-### Persisted dbt Model Metadata
-
-`utils/dbt_model_metadata.py` persists safe generated-model metadata under:
-
-```text
-dbt/generated_metadata/
-├── silver/
-└── gold/
-```
-
-Metadata includes:
-
-- layer
-- logical dataset name
-- source dataset
-- model name
-- source model name where applicable
-- input columns
-- output columns
-- canonical plan fingerprint
-- validated plan payload
-
-The metadata store verifies fingerprints on load and uses atomic persistence.
-
-### Agent Integration
-
-The ETL agent exposes:
-
-```text
-dbt_bronze_to_silver_tool
-dbt_silver_to_gold_tool
-```
-
-The dbt-specific workflow is:
-
-```text
-extract_load_tool
-      ↓
-dbt_bronze_to_silver_tool
-      ↓
-dbt_silver_to_gold_tool
-```
-
-Lower-level primitives such as:
-
-```text
-load_bronze_to_warehouse
-create_dbt_silver_model
-create_dbt_gold_model
-build_dbt_dataset
-```
-
-are not exposed directly to the orchestration LLM.
-
-## 2H.8 — dbt Artifacts, Lineage, and Execution Observability
-
-### Safe Artifact Reader
+## Safe dbt artifacts
 
 `utils/dbt_artifacts.py` reads a bounded subset of:
 
@@ -970,89 +762,267 @@ dbt/target/manifest.json
 dbt/target/run_results.json
 ```
 
-The reader extracts only safe execution/lineage information such as:
+Allowed artifact metadata includes:
 
 - invocation ID
-- target model unique ID
-- target model name
-- target status
-- execution timing
-- relation schema/name
+- model unique ID
+- model name
+- model status
+- timing
+- relation identity
 - dependencies
 - executed model IDs
-- dbt test names/status/failure counts
+- dbt test status/failure counts
 
-It deliberately excludes:
+It excludes:
 
 - compiled SQL
-- raw dbt messages
+- raw dbt output
 - adapter responses
 - credentials
-- CLI argument dictionaries
+- CLI dictionaries
 - filesystem paths
-
-Artifact parsing occurs while the shared dbt execution lock is still held, preventing another build in the same process from overwriting `target/` before the current build is correlated.
-
-### dbt Build Lineage
-
-`LineageStore` supports:
-
-```text
-dbt_build
-```
-
-events.
-
-A successful dbt lineage event can link:
-
-```text
-source logical dataset
-target logical dataset
-dbt model name
-dbt unique_id
-physical relation
-dependencies
-invocation_id
-plan fingerprint
-quality contract fingerprint
-dbt test results
-execution timings
-```
-
-Successful dbt lineage cannot be written for a failed target model.
-
-### dbt Execution Observability
-
-The high-level dbt tools return an internal typed build report.
-
-The LLM receives only safe textual tool output.
-
-The execution store receives allowlisted structured dbt metadata such as:
-
-```text
-invocation_id
-model
-model_unique_id
-relation
-target_status
-target execution time
-total elapsed time
-executed model count
-test counts/status summary
-lineage_event_id
-plan fingerprint
-quality contract state/fingerprint
-```
-
-Failed dbt executions also use an explicit safe field allowlist.
-
-Raw SQL, raw dbt output, credentials, paths, and raw transformation prompts are not persisted in execution observability.
 
 ---
 
-# Current ETL Durability Model
+# Phase 2I — Governed Warehouse Analytics ✅
 
-## Incremental Bronze Ingestion
+Phase 2I connects the SQL Analyst to warehouse-backed Silver/Gold outputs without giving the LLM unrestricted database access.
+
+```text
+2I.1  Safe Silver/Gold analytics catalog       ✅
+2I.2  SQL AST relation/schema allowlisting     ✅
+2I.3  SQL Analyst → governed dbt warehouse     ✅
+2I.4  SQL execution observability              ✅
+2I.5  Full ETL → dbt → analytics E2E           ✅
+```
+
+The security boundary is:
+
+```text
+LLM decides WHAT analytical query is needed
+                 ↓
+deterministic catalog decides WHAT EXISTS
+                 ↓
+SQLGlot decides WHAT MAY BE QUERIED
+                 ↓
+PostgreSQL executes read-only
+```
+
+## 2I.1 — Governed analytics catalog
+
+`DatabaseUtil.analytics_catalog()` builds a deterministic metadata-only catalog for exactly:
+
+```text
+<DBT_TARGET_SCHEMA>_silver
+<DBT_TARGET_SCHEMA>_gold
+```
+
+For the default configuration:
+
+```text
+dbt_dev_silver
+dbt_dev_gold
+```
+
+The catalog contains:
+
+- schema names
+- layer (`silver` / `gold`)
+- relation names
+- relation type (`table` / `view`)
+- column names
+- column data types
+
+It does **not** fetch or expose sample rows.
+
+Bronze, `public`, `information_schema`, `pg_catalog`, and other unrelated schemas are excluded.
+
+## 2I.2 — Scope-aware SQL relation/schema allowlisting
+
+`utils/sql_safety.py` revalidates the catalog and uses SQLGlot scopes to distinguish:
+
+- physical PostgreSQL relations
+- CTEs
+- subqueries
+
+Governed SQL must satisfy all of the following:
+
+- exactly one parsed query
+- read-only AST
+- no forbidden DML/DDL
+- every physical relation is schema-qualified
+- every physical schema exists in the governed catalog
+- every physical relation exists in the governed catalog
+- no cross-database references
+- no Bronze
+- no `public`
+- no `information_schema`
+- no `pg_catalog`
+- no `pg_*` system schemas
+- at least one approved Silver or Gold physical relation is referenced
+
+CTEs may be referenced without schema qualification, but physical relations inside them must still be governed.
+
+The validator returns the approved physical relation identities as:
+
+```text
+referenced_relations
+```
+
+for downstream observability.
+
+## 2I.3 — One catalog snapshot for prompting and validation
+
+The SQL Agent loads one governed analytics catalog snapshot at prompt-building time.
+
+That same snapshot is stored in graph state and passed to `SQLSafetyValidator`.
+
+```text
+catalog loaded once
+      │
+      ├── serialize for LLM prompt
+      │
+      └── enforce in SQL validator
+```
+
+The validator does not perform a second catalog lookup.
+
+This keeps the LLM-visible schema context aligned with the deterministic enforcement boundary for that run.
+
+## 2I.4 — SQL execution observability
+
+`ExecutionRunStore` is shared by the ETL and SQL agents.
+
+SQL runs record safe structured events such as:
+
+```text
+sql_safety
+sql_execution
+```
+
+Successful safety metadata may include:
+
+```text
+relation_count
+referenced_relations
+```
+
+Successful execution metadata may include:
+
+```text
+relation_count
+referenced_relations
+row_count
+column_count
+truncated
+duration
+```
+
+Failure metadata records only safe information such as:
+
+```text
+error_type
+```
+
+SQL observability deliberately excludes:
+
+- user questions
+- curated questions
+- generated SQL text
+- prompt text
+- result row values
+- raw database error messages
+- credentials
+
+Regression tests verify these privacy guarantees.
+
+## 2I.5 — Full end-to-end validation
+
+`phase_2i_e2e.py` exercises the complete stack using the Open Library public API.
+
+The test pipeline is:
+
+```text
+Open Library Search API
+        ↓
+record_path = docs
+        ↓
+Bronze: books_phase2i
+        ↓
+bronze.books_phase2i
+        ↓
+Silver: books_phase2i_clean
+        ↓
+dbt_dev_silver.stg_books_phase2i_clean
+        ↓
+Gold: books_phase2i_modern
+        ↓
+dbt_dev_gold.mart_books_phase2i_modern
+        ↓
+governed catalog
+        ↓
+natural-language analytical question
+        ↓
+generated SQL
+        ↓
+SQLGlot + relation allowlist
+        ↓
+read-only PostgreSQL
+        ↓
+natural-language answer
+```
+
+The current E2E request uses:
+
+```text
+https://openlibrary.org/search.json?q=machine%20learning&fields=key,title,first_publish_year,edition_count&limit=20&page=1
+```
+
+with records under:
+
+```text
+docs
+```
+
+The Gold transformation keeps books where:
+
+```text
+first_publish_year >= 2000
+edition_count >= 5
+```
+
+and the analytical question asks for the books ordered by highest edition count.
+
+A successful validation run confirmed:
+
+- 20 Bronze rows
+- 20 Silver rows
+- 4 Gold rows in that live API response
+- the SQL Agent selected `dbt_dev_gold.mart_books_phase2i_modern`
+- the SQL safety validator approved that exact governed relation
+- read-only execution returned the Gold rows
+- SQL observability recorded safe relation/row/column metadata
+
+Because Open Library is a live external API, exact row contents and counts can change over time.
+
+Run the E2E locally with:
+
+```bash
+uv run python phase_2i_e2e.py
+```
+
+Inspect the warehouse with:
+
+```bash
+uv run python inspect_warehouse.py
+```
+
+---
+
+# Current Durability Model
+
+## Incremental Bronze ingestion
 
 ```text
 load checkpoint
@@ -1076,7 +1046,7 @@ lineage persistence
 checkpoint commit
 ```
 
-## File-Backed Silver / Gold Promotion
+## File-backed Silver / Gold promotion
 
 ```text
 load source layer
@@ -1100,12 +1070,12 @@ deterministic quality evaluation
               lineage
 ```
 
-## Warehouse-Backed dbt Promotion
+## Warehouse-backed dbt promotion
 
 ```text
 Bronze filesystem
       ↓
-refresh bronze PostgreSQL relation in place
+refresh Bronze PostgreSQL relation in place
       ↓
 persist warehouse sync metadata
       ↓
@@ -1117,7 +1087,7 @@ typed DBTTransformPlan
       ↓
 deterministic SQL compilation
       ↓
-persist generated model + model metadata
+persist model + model metadata
       ↓
 synchronize dbt quality tests
       ↓
@@ -1130,7 +1100,7 @@ dbt_build lineage
 safe execution observability
 ```
 
-Execution-observability failure does not invalidate otherwise successful ETL execution because observability is diagnostic rather than part of the data commit contract.
+Observability failure does not invalidate an otherwise successful data commit because observability is diagnostic rather than part of the data-commit contract.
 
 ---
 
@@ -1138,27 +1108,32 @@ Execution-observability failure does not invalidate otherwise successful ETL exe
 
 ```text
 data/_state/
-    → Where should incremental ingestion resume?
+    → incremental checkpoints
 
 data/_contracts/
-    → What quality rules govern a Silver or Gold dataset?
+    → persisted Silver/Gold quality contracts
 
 data/_lineage/
-    → Which source/transformation produced this dataset?
-      Which quality contract authorized promotion?
-      Which warehouse/dbt execution produced the relation?
+    → durable dataset / warehouse / dbt lineage
 
 data/_runs/
-    → What happened during this specific ETL-agent execution?
+    → ETL and SQL execution observability
 
-data/bronze/<dataset>/warehouse_sync_metadata.json
-    → Which Bronze relation was synchronized into PostgreSQL?
+data/bronze/<dataset>/
+    → Bronze data, extraction metadata, schema history,
+      schema rejection reports, warehouse sync metadata
+
+data/silver/<dataset>/
+    → file-backed Silver outputs
+
+data/gold/<dataset>/
+    → file-backed Gold outputs
 
 dbt/generated_metadata/
-    → Which validated dbt plan/model metadata belongs to each logical dataset?
+    → validated generated model metadata + plan fingerprints
 
 dbt/target/
-    → Ephemeral dbt execution artifacts used for safe lineage/observability parsing
+    → ephemeral dbt execution artifacts consumed safely
 ```
 
 ---
@@ -1178,60 +1153,45 @@ dbt_dev_gold
 └── mart_<dataset>               # dbt table
 ```
 
-The exact Silver/Gold schema prefix is controlled by:
+The Silver/Gold schema prefix is controlled by:
 
 ```env
 DBT_TARGET_SCHEMA=dbt_dev
 ```
 
-To inspect the current database locally:
-
-```bash
-uv run python inspect_warehouse.py
-```
-
 ---
 
-# SQL Agent
+# Read-Only SQL Execution
 
-The SQL agent converts natural-language analytical questions into PostgreSQL queries.
+`DatabaseUtil` is intentionally separate from the warehouse writer.
 
-Generated SQL is not trusted directly.
-
-Before execution, SQL is parsed with SQLGlot and inspected as an AST.
-
-The validation layer:
-
-- allows exactly one statement
-- permits read-only query expressions
-- rejects DML
-- rejects DDL
-- rejects multi-statement SQL
-- rejects invalid SQL
-- inspects nested operations and CTEs for hidden writes
-
-Database execution adds another safety layer:
+The analytical path uses read-only PostgreSQL sessions with:
 
 ```text
-Generated SQL
-      │
-      ▼
-SQLGlot AST validation
-      │
-      ▼
-Read-only PostgreSQL transaction
-      │
+generated SQL
+      ↓
+SQLGlot validation
+      ↓
+governed relation validation
+      ↓
+read-only transaction
       ├── statement timeout
       ├── result row limit
       └── rollback
-      │
-      ▼
-Analytics result
+      ↓
+ReadOnlyQueryResult
 ```
 
-![SQL Analyst Graph](sql_analyst_graph.png)
+`ReadOnlyQueryResult` contains:
 
-The current SQL Analyst is still separate from the new governed dbt Silver/Gold catalog. Connecting it safely to application-approved warehouse relations is the next planned phase.
+```text
+columns
+rows
+row_count
+truncated
+```
+
+Only safe aggregate execution metadata is persisted to observability.
 
 ---
 
@@ -1291,6 +1251,11 @@ Autonomous-data-engineer-agent/
 │   └── warehouse.py
 │
 ├── tests/
+│   ├── test_api_client.py
+│   ├── test_data_layers.py
+│   ├── test_data_quality.py
+│   ├── test_data_quality_contracts.py
+│   ├── test_database.py
 │   ├── test_dbt_artifacts.py
 │   ├── test_dbt_execution.py
 │   ├── test_dbt_models.py
@@ -1298,10 +1263,21 @@ Autonomous-data-engineer-agent/
 │   ├── test_dbt_quality.py
 │   ├── test_dbt_sources.py
 │   ├── test_dbt_sql.py
-│   ├── test_warehouse.py
-│   └── ...
+│   ├── test_etl_agent.py
+│   ├── test_etl_tools.py
+│   ├── test_incremental_state.py
+│   ├── test_lineage.py
+│   ├── test_schema_evolution.py
+│   ├── test_settings.py
+│   ├── test_sql_agent.py
+│   ├── test_sql_safety.py
+│   └── test_warehouse.py
 │
+├── data_engineer_graph.png
+├── etl_analyst_graph.png
+├── sql_analyst_graph.png
 ├── inspect_warehouse.py
+├── phase_2i_e2e.py
 ├── main.py
 ├── pyproject.toml
 └── uv.lock
@@ -1311,6 +1287,7 @@ Autonomous-data-engineer-agent/
 
 # Tech Stack
 
+- Python 3.12+
 - LangGraph / LangChain
 - OpenAI / Anthropic
 - Pandas / PyArrow
@@ -1340,19 +1317,37 @@ Never commit a real `.env` file.
 
 # Runtime Configuration
 
-Important runtime controls include:
+Important environment variables include:
 
 ```env
+OPENAI_API_KEY=...
+ANTHROPIC_API_KEY=...
+
+DB_HOST=localhost
+DB_PORT=5432
+DB_USER=...
+DB_PASSWORD=...
+DB_NAME=...
+
+SQL_STATEMENT_TIMEOUT_MS=10000
+SQL_MAX_ROWS=1000
+
+HTTP_TIMEOUT_SECONDS=30
+API_MAX_RESPONSE_BYTES=20000000
+API_MAX_TOTAL_RESPONSE_BYTES=100000000
+API_MAX_PAGES=50
+API_MAX_RECORDS=100000
+API_RETRY_TOTAL=4
+API_RETRY_BACKOFF_SECONDS=0.5
+API_MAX_REDIRECTS=5
+
 ETL_MAX_TOOL_CALLS=8
+
 DBT_TARGET_SCHEMA=dbt_dev
 DBT_THREADS=4
 ```
 
-`ETL_MAX_TOOL_CALLS` bounds the number of ETL tool executions in one agent run.
-
-`DBT_TARGET_SCHEMA` controls the dbt target-schema prefix.
-
-`DBT_THREADS` is validated and bounded before dbt execution.
+See `.env.example` for the full configuration.
 
 ---
 
@@ -1364,12 +1359,18 @@ Run the top-level router:
 uv run python main.py
 ```
 
-Or individual agents:
+Run individual agents:
 
 ```bash
 uv run python -m agents.data_engineer
 uv run python -m agents.etl_analyst
 uv run python -m agents.sql_analyst
+```
+
+Run the full Phase 2I integration scenario:
+
+```bash
+uv run python phase_2i_e2e.py
 ```
 
 Inspect warehouse contents:
@@ -1382,37 +1383,53 @@ uv run python inspect_warehouse.py
 
 # Testing
 
-Important coverage includes:
+Coverage includes:
 
-- API destination validation and SSRF protection
-- pagination, retries, limits, and HTTP failure normalization
+- SSRF/public-destination validation
+- redirect safety
+- pagination and retry behavior
+- response/page/record limits
+- authenticated API behavior
 - watermark-based incremental extraction
 - checkpoint durability and source/config binding
-- schema drift classification and additive evolution
-- breaking-schema rejection reports
+- schema drift classification
+- additive schema evolution
+- breaking-schema rejection
 - deterministic transformation plans
-- deterministic data-quality rules
-- multi-stage agent orchestration
-- failure-stop routing
-- Bronze → PostgreSQL warehouse loading
+- quality-rule evaluation
+- persisted quality contracts
+- Silver/Gold promotion gates
+- ETL orchestration order
+- failure-stop behavior
+- ETL tool-call limits
+- Bronze → PostgreSQL loading
 - PostgreSQL identifier safety
-- dependency-safe in-place Bronze refresh
-- dynamic dbt Bronze source generation
-- Silver dbt model generation
-- Gold dbt mart generation
+- dependency-safe Bronze refresh
+- dynamic dbt source generation
+- generated Silver models
+- generated Gold marts
 - deterministic `DBTTransformPlan` compilation
 - SQLGlot validation of generated dbt SQL
-- dbt model metadata persistence and fingerprint validation
-- dbt quality-contract synchronization
-- bounded dbt selectors and execution
-- environment restoration after dbt execution
+- dbt model metadata fingerprints
+- dbt quality synchronization
+- bounded dbt execution
 - dbt artifact parsing
 - dbt build → lineage linkage
-- dbt build → execution-observability linkage
-- exclusion of compiled SQL/credentials/raw prompts from dbt observability
-- SQL AST safety and read-only database execution
+- dbt build → observability linkage
+- governed analytics catalog
+- exclusion of sample rows from SQL LLM context
+- SQL AST write protection
+- relation/schema allowlisting
+- cross-database rejection
+- scope-aware CTE validation
+- governed relation reporting
+- single-snapshot catalog propagation
+- read-only query execution
+- SQL execution observability
+- SQL observability privacy guarantees
+- exclusion of generated SQL, prompts, row values, and raw DB errors from SQL run logs
 
-Run all tests:
+Run the full test suite:
 
 ```bash
 uv run pytest -v
@@ -1449,55 +1466,69 @@ The LLM does not directly control:
 
 - arbitrary Python execution
 - arbitrary local filesystem paths
-- Bronze/Silver/Gold physical locations
+- physical Bronze/Silver/Gold paths
 - API authentication tokens
-- checkpoint cursor values
+- previous checkpoint cursor values
 - checkpoint persistence timing
 - source-schema compatibility decisions
 - schema-rejection policy
 - PostgreSQL credentials
 - arbitrary warehouse schemas
-- arbitrary warehouse table names
-- destructive Bronze table refresh behavior
+- arbitrary Bronze table names outside the logical dataset mapping
+- destructive Bronze table replacement
 - dbt project/profile paths
 - arbitrary dbt selectors
 - arbitrary dbt CLI arguments
-- arbitrary generated dbt SQL
-- direct dbt artifact contents
+- arbitrary dbt SQL/Jinja generation
+- dbt artifact contents
 - lineage file contents
 - direct Bronze → Gold transitions
-- an unlimited ETL tool loop
-- continuation after a failed required tool
+- unlimited ETL tool loops
+- continuation after failed required ETL stages
 - deterministic quality pass/fail decisions
 - direct quality-contract file paths
 - quality-contract fingerprints
-- replacement or weakening of an existing different quality contract
-- quality-check bypasses
-- successful lineage creation for failed dbt model builds
+- quality bypass
+- replacement/weakening of a conflicting quality contract
+- analytical access to Bronze
+- analytical access to `public`
+- analytical access to PostgreSQL system schemas
+- arbitrary analytical relations not present in the governed catalog
+- cross-database analytical references
+- SQL execution outside read-only PostgreSQL sessions
 
-For dbt transformations, the LLM produces a validated `DBTTransformPlan`; deterministic application code compiles and executes it.
+For dbt transformations:
 
-For analytical SQL, SQLGlot AST validation and read-only PostgreSQL execution remain independent deterministic safety layers.
+```text
+LLM → validated DBTTransformPlan → deterministic SQL compiler → dbt
+```
+
+For analytical SQL:
+
+```text
+LLM → governed catalog → SQLGlot AST + relation allowlist → read-only PostgreSQL
+```
 
 ---
 
 # Current Limitations
 
 - incremental retry idempotency still uses exact-row equality rather than business-key upserts
-- breaking source schema changes are rejected instead of automatically migrated
-- optional fields disappearing from an entire batch may appear as schema removal
+- Bronze warehouse synchronization currently uses full-table refresh-in-place rather than business-key incremental merge/upsert
+- dbt Gold models are currently rebuilt as tables rather than application-governed incremental models
+- breaking source schema changes are rejected rather than automatically migrated
+- optional fields disappearing from a whole batch may appear as schema removal
 - response-size limits are not yet enforced while streaming the HTTP body
-- data-quality rules are currently limited to `not_null`, `unique`, `accepted_values`, `range`, and `row_count`
-- file-backed Pandas Silver/Gold and warehouse-backed dbt Silver/Gold currently coexist as two supported execution paths
-- Bronze warehouse refresh is full-table refresh-in-place, not business-key incremental warehouse merging
-- dbt model generation currently uses a bounded typed operation set rather than unrestricted SQL modeling
-- generated model metadata is file-backed
-- lineage uses a single JSON history and is not designed for highly concurrent distributed writers
-- execution observability is local file-based rather than backed by centralized tracing/metrics
-- dbt execution uses an in-process lock; distributed execution coordination is not yet implemented
+- quality rules are currently limited to `not_null`, `unique`, `accepted_values`, `range`, and `row_count`
+- file-backed Pandas and warehouse-backed dbt transformation paths coexist
+- dbt model generation uses a bounded typed operation set rather than unrestricted SQL modeling
+- generated dbt model metadata is file-backed
+- lineage uses a single JSON history and is not intended for highly concurrent distributed writers
+- execution observability is local file-backed rather than centralized tracing/metrics
+- dbt execution uses an in-process lock rather than distributed coordination
 - quality rejections preserve aggregate diagnostics but do not provide row-level quarantine datasets
-- the SQL Analyst is not yet governed against an explicit Silver/Gold dbt catalog
-- broader live-LLM evaluation and cost monitoring remain future work
+- live-LLM evaluation and cost monitoring are not yet implemented
+- the Phase 2I E2E uses a live public API, so external API availability/content can change independently of the repository
 
 ---
 
@@ -1507,11 +1538,12 @@ For analytical SQL, SQLGlot AST validation and read-only PostgreSQL execution re
 
 ### Phase 2A — Reliable API Ingestion
 
-- ✅ dedicated `APIClient`
-- ✅ pagination / retries / rate-limit handling
+- ✅ deterministic `APIClient`
+- ✅ pagination
+- ✅ retries / rate-limit handling
 - ✅ authenticated APIs
 - ✅ extraction limits
-- ✅ SSRF and redirect hardening
+- ✅ SSRF / redirect hardening
 
 ### Phase 2B — Incremental Ingestion
 
@@ -1525,111 +1557,135 @@ For analytical SQL, SQLGlot AST validation and read-only PostgreSQL execution re
 ### Phase 2C — Schema Evolution
 
 - ✅ schema drift detection
-- ✅ additive schema evolution
-- ✅ schema fingerprints and history
+- ✅ additive evolution
+- ✅ schema fingerprints/history
 - ✅ breaking-change rejection reports
 - ✅ rejection-event idempotency
 
 ### Phase 2D — Medallion Architecture and Lineage
 
-- ✅ deterministic DataLayer routing
+- ✅ deterministic Bronze/Silver/Gold routing
 - ✅ safe logical dataset names
-- ✅ Bronze ingestion
-- ✅ Silver transformations
-- ✅ Gold analytics outputs
-- ✅ planner / executor separation
-- ✅ Medallion agent tools
+- ✅ deterministic transformation execution
 - ✅ multi-stage ETL orchestration
-- ✅ deterministic lineage
-- ✅ schema / plan fingerprints
-- ✅ lineage-before-checkpoint durability
+- ✅ durable lineage
+- ✅ schema/plan fingerprints
 
 ### Phase 2E — Agent Runtime Reliability and CI
 
-- ✅ deterministic ETL-agent graph tests
-- ✅ active safe-tool surface tests
+- ✅ deterministic orchestration tests
 - ✅ one-tool-per-turn enforcement
-- ✅ configurable ETL tool-call budget
-- ✅ deterministic failure-stop routing
-- ✅ terminal success/failure run states
-- ✅ structured `_runs/` execution observability
-- ✅ event timing and allowlisted metadata
-- ✅ raw prompt / raw tool-argument minimization
+- ✅ bounded ETL tool loop
+- ✅ failure-stop routing
+- ✅ execution observability
 - ✅ GitHub Actions CI
 
-### Phase 2F — Data Quality and Dataset Contracts
+### Phase 2F — Data Quality and Contracts
 
-- ✅ typed deterministic quality-rule engine
-- ✅ persisted dataset-specific quality contracts
-- ✅ stable contract fingerprints
-- ✅ Silver and Gold quality promotion gates
-- ✅ last-known-good output preservation
-- ✅ aggregate quality rejection reports
-- ✅ agent-facing quality-contract configuration
-- ✅ quality-aware lineage and observability
-- ✅ no quality bypass or contract weakening through the agent
+- ✅ typed deterministic quality rules
+- ✅ persisted contracts
+- ✅ Silver/Gold quality gates
+- ✅ last-known-good preservation
+- ✅ agent-facing contract configuration
+- ✅ quality-aware lineage/observability
 
 ### Phase 2G — PostgreSQL Warehouse Bridge
 
-- ✅ deterministic `PostgresWarehouseLoader`
-- ✅ application-controlled `bronze` schema
-- ✅ safe logical table naming and identifier limits
-- ✅ Bronze dataset → PostgreSQL synchronization
-- ✅ warehouse synchronization metadata
-- ✅ `warehouse_sync` lineage
-- ✅ dynamic dbt source refresh after warehouse commit
-- ✅ dependency-safe in-place Bronze refresh
-- ✅ additive physical-column evolution
-- ✅ no `DROP ... CASCADE` refresh behavior
+- ✅ deterministic warehouse writer
+- ✅ Bronze → PostgreSQL sync
+- ✅ additive physical schema evolution
+- ✅ dependency-safe refresh-in-place
+- ✅ warehouse metadata
+- ✅ warehouse lineage
+- ✅ generated Bronze dbt sources
 
 ### Phase 2H — dbt Integration
 
 - ✅ dbt project + PostgreSQL adapter
-- ✅ dynamic Bronze source registry
-- ✅ generated Silver dbt models
-- ✅ generated Gold dbt marts
-- ✅ dbt quality tests from existing contracts
-- ✅ bounded application-controlled dbt execution
+- ✅ dynamic Bronze sources
+- ✅ generated Silver models
+- ✅ generated Gold marts
+- ✅ dbt quality tests
+- ✅ bounded dbt execution
 - ✅ typed `DBTTransformPlan`
-- ✅ deterministic PostgreSQL/dbt SQL compiler
-- ✅ persisted model metadata + plan fingerprints
-- ✅ dbt-specific planner/agent workflow integration
-- ✅ safe manifest/run-results artifact reader
-- ✅ artifact-verified `dbt_build` lineage
-- ✅ dbt execution observability
-- ✅ safe exclusion of compiled SQL, credentials, paths, and raw prompts
+- ✅ deterministic SQL compilation
+- ✅ model metadata + fingerprints
+- ✅ safe dbt artifact reader
+- ✅ dbt lineage
+- ✅ dbt observability
+
+### Phase 2I — Governed Warehouse Analytics
+
+- ✅ metadata-only Silver/Gold analytics catalog
+- ✅ no sample rows in SQL-generation schema context
+- ✅ scope-aware SQL relation/schema allowlisting
+- ✅ Bronze/public/system-schema rejection
+- ✅ cross-database rejection
+- ✅ exact governed catalog snapshot reused for prompting + validation
+- ✅ governed Silver/Gold SQL generation
+- ✅ read-only PostgreSQL execution
+- ✅ structured SQL execution observability
+- ✅ SQL observability privacy regression tests
+- ✅ full API → Bronze → dbt Silver/Gold → governed analytics E2E
 
 ---
 
 ## Next Planned Work
 
-### Phase 2I — Governed Warehouse Analytics
+### Phase 2J — Incremental Warehouse Processing
 
-Connect the SQL Analyst to the warehouse-backed Medallion outputs without giving the LLM arbitrary database access.
+The next planned phase extends incremental behavior beyond file-backed Bronze ingestion and into the warehouse/dbt path.
 
-Planned direction:
+Proposed direction:
 
-- application-controlled Silver/Gold analytics catalog
-- no raw sample-row values in LLM schema context
-- deterministic SQL relation/schema allowlisting
-- reject Bronze, `public`, system catalogs, nonexistent relations, and unsafe relation references
-- expose governed dbt Silver/Gold metadata to SQL generation
-- add SQL execution observability
-- run an end-to-end API → Bronze → dbt Silver/Gold → analytical question workflow
+```text
+2J.1  Typed business-key contracts
+2J.2  Incremental PostgreSQL Bronze merge/upsert
+2J.3  Warehouse/checkpoint consistency
+2J.4  Governed dbt incremental materialization
+2J.5  Incremental lineage + observability
+2J.6  Two-run incremental E2E validation
+```
+
+Target architecture:
+
+```text
+External API
+      ↓
+watermark extraction
+      ↓
+durable Bronze state
+      ↓
+validated business key
+      ↓
+PostgreSQL merge/upsert
+      ├── insert new rows
+      ├── update changed rows
+      └── preserve unchanged rows
+      ↓
+dbt Silver
+      ↓
+governed incremental Gold
+      ↓
+governed SQL analytics
+```
+
+The same project principle remains:
+
+> **The LLM may decide which supported incremental workflow is needed. Deterministic code owns key validation, merge semantics, checkpoint durability, physical SQL, and dbt materialization configuration.**
 
 ### Later Candidates
 
-- configurable business-key warehouse upserts
-- richer semantic contracts and dataset metadata
+- richer semantic/data contracts
+- row-level quarantine datasets
+- centralized tracing and metrics
 - external workflow orchestration
-- Docker/containerized deployment
+- Docker/container deployment
 - richer lineage backends
-- centralized tracing / metrics
 - distributed dbt execution coordination
+- streamed response-size enforcement
 - live LLM evaluation
 - LLM cost monitoring
-- streamed response-size enforcement
-- row-level quarantine datasets
 
 ---
 
