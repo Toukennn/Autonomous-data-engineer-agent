@@ -16,6 +16,7 @@ from models.schema import (
     TransformPlan,
 )
 
+from models.warehouse_keys import BusinessKeyContract
 from utils.api_client import APIExtractionResult
 from utils.dbt_model_metadata import DBTModelMetadataStore
 from utils.exceptions import (

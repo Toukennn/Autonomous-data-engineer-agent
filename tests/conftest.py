@@ -8,6 +8,9 @@ from utils.data_quality_contracts import (
     DataQualityContractStore,
 )
 
+from utils.business_keys import (
+    BusinessKeyContractStore,
+)
 
 @pytest.fixture
 def isolated_etl_tools(tmp_path):
@@ -44,6 +47,12 @@ def isolated_etl_tools(tmp_path):
 
     tools.quality_contract_store = (
         DataQualityContractStore(
+            tools.data_root
+        )
+    )
+
+    tools.business_key_contract_store = (
+        BusinessKeyContractStore(
             tools.data_root
         )
     )
