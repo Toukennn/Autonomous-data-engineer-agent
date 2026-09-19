@@ -5,6 +5,7 @@ from unittest.mock import (
     MagicMock,
 )
 
+from models.warehouse_keys import BusinessKeyContract
 from utils.exceptions import (
     DatasetError,
     WarehouseLoadError,

@@ -3063,11 +3063,53 @@ class FakeWarehouseLoader:
     ):
         self.calls.append(
             {
+                "mode": (
+                    "refresh_in_place"
+                ),
                 "dataset_name": (
                     dataset_name
                 ),
                 "dataframe": (
                     dataframe.copy()
+                ),
+                "business_key": None,
+            }
+        )
+
+        return WarehouseLoadResult(
+            schema="bronze",
+            table=dataset_name,
+            row_count=len(
+                dataframe
+            ),
+            column_count=len(
+                dataframe.columns
+            ),
+            columns=tuple(
+                dataframe.columns
+            ),
+        )
+
+    def merge_bronze_table(
+        self,
+        *,
+        dataset_name,
+        dataframe,
+        business_key,
+    ):
+        self.calls.append(
+            {
+                "mode": (
+                    "merge_upsert"
+                ),
+                "dataset_name": (
+                    dataset_name
+                ),
+                "dataframe": (
+                    dataframe.copy()
+                ),
+                "business_key": (
+                    business_key
                 ),
             }
         )
@@ -3167,6 +3209,16 @@ def test_bronze_dataset_loads_to_warehouse(
 
     call = (
         warehouse.calls[0]
+    )
+
+    assert (
+        call["mode"]
+        == "refresh_in_place"
+    )
+
+    assert (
+        call["business_key"]
+        is None
     )
 
     assert (
@@ -3275,6 +3327,27 @@ def test_bronze_dataset_loads_to_warehouse(
             "order_id",
             "amount",
         ]
+    )
+
+    assert (
+        metadata[
+            "business_key_configured"
+        ]
+        is False
+    )
+
+    assert (
+        metadata[
+            "business_key_columns"
+        ]
+        == []
+    )
+
+    assert (
+        metadata[
+            "business_key_fingerprint"
+        ]
+        is None
     )
 
     # ============================================================
@@ -3389,6 +3462,209 @@ def test_bronze_dataset_loads_to_warehouse(
         in result
     )
 
+
+def test_warehouse_bridge_uses_merge_when_business_key_exists(
+    isolated_etl_tools,
+    tmp_path,
+):
+    bronze_directory = (
+        isolated_etl_tools.data_root
+        / "bronze"
+        / "orders"
+    )
+
+    bronze_directory.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    source = pd.DataFrame(
+        {
+            "order_id": [
+                1,
+                2,
+            ],
+            "amount": [
+                10.0,
+                20.0,
+            ],
+        }
+    )
+
+    source.to_csv(
+        bronze_directory
+        / "extracted_data.csv",
+        index=False,
+    )
+
+    # ------------------------------------------------------------
+    # Persist row-identity contract
+    # ------------------------------------------------------------
+
+    contract = (
+        BusinessKeyContract(
+            columns=[
+                "order_id"
+            ]
+        )
+    )
+
+    fingerprint = (
+        isolated_etl_tools
+        .business_key_contract_store
+        .save(
+            dataset_name="orders",
+            contract=contract,
+        )
+    )
+
+    # ------------------------------------------------------------
+    # Fake warehouse
+    # ------------------------------------------------------------
+
+    warehouse = (
+        FakeWarehouseLoader()
+    )
+
+    isolated_etl_tools\
+        ._warehouse_loader = (
+            warehouse
+        )
+
+    # ------------------------------------------------------------
+    # Isolated dbt source registry
+    # ------------------------------------------------------------
+
+    dbt_project_dir = (
+        tmp_path
+        / "dbt"
+    )
+
+    isolated_etl_tools.dbt_source_registry = (
+        DBTSourceRegistry(
+            data_root=(
+                isolated_etl_tools
+                .data_root
+            ),
+            dbt_project_dir=(
+                dbt_project_dir
+            ),
+        )
+    )
+
+    # ------------------------------------------------------------
+    # Execute
+    # ------------------------------------------------------------
+
+    result = (
+        isolated_etl_tools
+        .load_bronze_to_warehouse(
+            dataset_name="orders",
+        )
+    )
+
+    # ------------------------------------------------------------
+    # Deterministic dispatch
+    # ------------------------------------------------------------
+
+    assert (
+        len(
+            warehouse.calls
+        )
+        == 1
+    )
+
+    call = (
+        warehouse.calls[0]
+    )
+
+    assert (
+        call["mode"]
+        == "merge_upsert"
+    )
+
+    assert (
+        call["dataset_name"]
+        == "orders"
+    )
+
+    assert (
+        call["business_key"]
+        == contract
+    )
+
+    pd.testing.assert_frame_equal(
+        call["dataframe"],
+        source,
+    )
+
+    # ------------------------------------------------------------
+    # User-facing result
+    # ------------------------------------------------------------
+
+    assert (
+        "Load mode: merge_upsert"
+        in result
+    )
+
+    assert (
+        "Business key:"
+        in result
+    )
+
+    assert (
+        fingerprint
+        in result
+    )
+
+    # ------------------------------------------------------------
+    # Persisted sync metadata
+    # ------------------------------------------------------------
+
+    metadata_file = (
+        bronze_directory
+        / "warehouse_sync_metadata.json"
+    )
+
+    with metadata_file.open(
+        "r",
+        encoding="utf-8",
+    ) as file:
+        metadata = (
+            json.load(
+                file
+            )
+        )
+
+    assert (
+        metadata[
+            "load_mode"
+        ]
+        == "merge_upsert"
+    )
+
+    assert (
+        metadata[
+            "business_key_configured"
+        ]
+        is True
+    )
+
+    assert (
+        metadata[
+            "business_key_columns"
+        ]
+        == [
+            "order_id"
+        ]
+    )
+
+    assert (
+        metadata[
+            "business_key_fingerprint"
+        ]
+        == fingerprint
+    )
 
 
 def test_warehouse_bridge_requires_bronze_dataset(
@@ -3673,3 +3949,72 @@ def test_dbt_gold_model_requires_silver_model_file(
             .create_dbt_gold_model(
                 source_dataset="orders",
             )
+
+
+def test_warehouse_bridge_rejects_invalid_business_key_before_database_write(
+    isolated_etl_tools,
+):
+    bronze_directory = (
+        isolated_etl_tools.data_root
+        / "bronze"
+        / "orders"
+    )
+
+    bronze_directory.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    # Duplicate business key.
+    pd.DataFrame(
+        {
+            "order_id": [
+                1,
+                1,
+            ],
+            "amount": [
+                10,
+                20,
+            ],
+        }
+    ).to_csv(
+        bronze_directory
+        / "extracted_data.csv",
+        index=False,
+    )
+
+    isolated_etl_tools\
+        .business_key_contract_store\
+        .save(
+            dataset_name="orders",
+            contract=(
+                BusinessKeyContract(
+                    columns=[
+                        "order_id"
+                    ]
+                )
+            ),
+        )
+
+    warehouse = (
+        FakeWarehouseLoader()
+    )
+
+    isolated_etl_tools\
+        ._warehouse_loader = (
+            warehouse
+        )
+
+    with pytest.raises(
+        DatasetError,
+        match="duplicate",
+    ):
+        isolated_etl_tools\
+            .load_bronze_to_warehouse(
+                dataset_name="orders",
+            )
+
+    assert (
+        warehouse.calls
+        == []
+    )
