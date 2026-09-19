@@ -146,3 +146,30 @@ class DBTArtifactError(
     dbt execution artifacts are missing,
     malformed, or inconsistent.
     """
+
+
+class BusinessKeyError(
+    DatasetError
+):
+    """
+    A dataset violates its configured
+    business-key contract.
+
+    details contains aggregate diagnostics
+    only and must not contain row values.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        details: dict[
+            str,
+            object,
+        ],
+    ):
+        super().__init__(
+            message
+        )
+
+        self.details = details
