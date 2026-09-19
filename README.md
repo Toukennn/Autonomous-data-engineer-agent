@@ -1,12 +1,12 @@
 # Autonomous Data Engineer Agent
 
-A safety-oriented agentic data engineering system for **API ingestion**, **deterministic ETL workflows**, **Medallion architecture**, **PostgreSQL warehousing**, **dbt transformations**, **data-quality contracts**, **lineage**, **runtime observability**, and **governed natural-language SQL analytics**.
+A safety-oriented agentic data engineering system for **API ingestion**, **persistent incremental processing**, **deterministic ETL workflows**, **Medallion architecture**, **PostgreSQL warehousing**, **dbt transformations**, **data-quality contracts**, **lineage**, **runtime observability**, and **governed natural-language SQL analytics**.
 
 The project uses LangGraph to route requests to specialized ETL and SQL agents while keeping sensitive operations under deterministic application control.
 
 > **LLMs decide what should happen. Deterministic tools decide how it happens.**
 
-The LLM may choose a supported workflow and create typed transformation or quality plans, but it does not receive arbitrary Python execution, arbitrary filesystem access, direct checkpoint control, schema-policy control, unrestricted dbt execution, or unrestricted database access.
+The LLM may choose a supported workflow and create typed transformation or quality plans, but it does not receive arbitrary Python execution, arbitrary filesystem access, direct checkpoint control, schema-policy control, unrestricted dbt execution, unrestricted database access, or control over warehouse merge keys/materialization settings.
 
 ---
 
@@ -27,35 +27,45 @@ External API
 Python deterministic ingestion
     │
     ▼
-Bronze filesystem dataset
+Durable Bronze filesystem snapshot
+    │
+    ├── watermark checkpoint
+    ├── business-key contract
+    └── dataset fingerprint
     │
     ▼
 PostgreSQL bronze.<dataset>
     │
+    ├── refresh_in_place       (no business key)
+    └── merge_upsert           (business key configured)
+    │
     ▼
 dbt
- ┌──┴───────────────┐
- ▼                  ▼
-Silver views     Gold marts
-    │                  │
-    ├──── dbt tests ───┤
-    │                  │
+ ┌──┴────────────────────┐
+ ▼                       ▼
+Silver views          Gold marts
+                         │
+                         ├── table fallback
+                         └── governed incremental
+    │                       │
+    ├──── dbt tests ────────┤
+    │                       │
     └──── lineage / observability
-                       │
-                       ▼
-              governed analytics catalog
-                       │
-                       ▼
-                  SQL Analyst
-                       │
-                       ▼
-              SQLGlot AST validation
-                       │
-                       ▼
-             read-only PostgreSQL
-                       │
-                       ▼
-                analytical answer
+                            │
+                            ▼
+                   governed analytics catalog
+                            │
+                            ▼
+                       SQL Analyst
+                            │
+                            ▼
+                   SQLGlot AST validation
+                            │
+                            ▼
+                  read-only PostgreSQL
+                            │
+                            ▼
+                     analytical answer
 ```
 
 At a higher level:
@@ -121,7 +131,7 @@ Examples:
 - the LLM may describe a quality requirement
 - deterministic quality code decides pass/fail
 - the LLM may name a logical dataset
-- application code controls physical paths, schemas, model names, selectors, credentials, and execution boundaries
+- application code controls physical paths, schemas, model names, selectors, credentials, execution boundaries, business-key enforcement, merge semantics, and dbt materialization configuration
 
 The system treats all LLM output as untrusted input.
 
@@ -191,13 +201,18 @@ External API
     ↓
 extract_load_tool
     ↓
-Bronze filesystem dataset
+Durable Bronze filesystem snapshot
     ↓
 dbt_bronze_to_silver_tool
+    ├─ validate Bronze/checkpoint binding
     ├─ synchronize Bronze → PostgreSQL
+    │    ├─ refresh_in_place
+    │    └─ merge_upsert
+    ├─ refresh governed dbt source metadata
     ├─ create typed DBTTransformPlan
     ├─ deterministically compile dbt SQL
-    ├─ create Silver model
+    ├─ propagate safe business-key lineage
+    ├─ create Silver view
     ├─ synchronize dbt quality tests
     └─ execute bounded dbt build
     ↓
@@ -205,8 +220,9 @@ dbt Silver
     ↓
 dbt_silver_to_gold_tool
     ├─ create typed DBTTransformPlan
+    ├─ deterministically evaluate incremental safety
     ├─ deterministically compile dbt SQL
-    ├─ create Gold model
+    ├─ choose table vs incremental materialization
     ├─ synchronize dbt quality tests
     └─ execute bounded dbt build
     ↓
@@ -223,6 +239,9 @@ The agent cannot directly choose:
 - arbitrary dbt selectors or CLI arguments
 - dbt project/profile paths
 - database credentials
+- physical business-key indexes
+- warehouse merge SQL
+- dbt `materialized`, `unique_key`, or `incremental_strategy`
 - quality-check bypasses
 - direct mutation or weakening of an existing quality contract
 
@@ -399,11 +418,21 @@ Deterministic code controls:
 data/_state/
 ```
 
-Retry safety currently uses exact-row deduplication.
-
 The checkpoint advances only after the required durable writes succeed.
 
 Checkpoint metadata binds state to the source/configuration so one state key cannot silently be reused for a different incremental pipeline.
+
+Retry/merge behavior now has two modes:
+
+```text
+no business-key contract
+    → exact-row deduplication
+
+business-key contract configured
+    → incoming row replaces historical row with the same key
+```
+
+The keyed behavior was added in Phase 2J while preserving backward compatibility for unkeyed datasets.
 
 ---
 
@@ -461,6 +490,7 @@ data/bronze/<dataset>/
     extraction_metadata.json
     schema_history.json
     schema_change_rejections.json   # when required
+    warehouse_sync_metadata.json    # after warehouse sync
 ```
 
 ## Silver
@@ -607,9 +637,11 @@ Important controls include:
 
 The LLM never chooses the physical Bronze schema.
 
-## Dependency-safe refresh
+## Dependency-safe synchronization
 
-Existing Bronze tables are refreshed in place:
+The warehouse now supports two deterministic synchronization modes.
+
+### No business key: refresh in place
 
 ```text
 inspect existing table
@@ -625,7 +657,23 @@ INSERT refreshed rows
 COMMIT
 ```
 
-The loader does **not** use `DROP TABLE ... CASCADE`, preserving downstream dbt dependencies.
+### Business key configured: merge/upsert
+
+```text
+validate business-key contract
+      ↓
+validate historical warehouse keys
+      ↓
+ensure deterministic unique index
+      ↓
+INSERT ... ON CONFLICT (<key>)
+      ↓
+update only changed non-key columns
+      ↓
+COMMIT
+```
+
+The merge/upsert path does **not** truncate or drop the table.
 
 Successful sync persists:
 
@@ -684,6 +732,8 @@ dbt/models/sources/bronze_sources.yml
 
 from successfully warehouse-synchronized Bronze datasets.
 
+Phase 2J also makes source registration snapshot-aware: if the durable Bronze file changes after warehouse synchronization, the source registry rejects the stale synchronization metadata instead of advertising the warehouse state as current.
+
 ## Silver models
 
 Generated Silver models use names such as:
@@ -700,6 +750,8 @@ dbt_dev_silver
 
 with the default target schema.
 
+Silver metadata may carry forward a deterministically proven business key for downstream incremental decisions.
+
 ## Gold marts
 
 Generated Gold models use names such as:
@@ -708,13 +760,25 @@ Generated Gold models use names such as:
 mart_<dataset>
 ```
 
-and are materialized as tables in:
+and live in:
 
 ```text
 dbt_dev_gold
 ```
 
 Gold generation requires an existing governed Silver dbt model and its persisted metadata.
+
+Gold materialization is now application-governed:
+
+```text
+safe key-preserving plan
+    → incremental
+
+unsafe / no key lineage
+    → table
+```
+
+The LLM does not control `materialized`, `unique_key`, or `incremental_strategy`.
 
 ## dbt quality tests
 
@@ -781,7 +845,7 @@ It excludes:
 - adapter responses
 - credentials
 - CLI dictionaries
-- filesystem paths
+- unrestricted filesystem paths
 
 ---
 
@@ -809,7 +873,7 @@ SQLGlot decides WHAT MAY BE QUERIED
 PostgreSQL executes read-only
 ```
 
-## 2I.1 — Governed analytics catalog
+## Governed analytics catalog
 
 `DatabaseUtil.analytics_catalog()` builds a deterministic metadata-only catalog for exactly:
 
@@ -825,74 +889,24 @@ dbt_dev_silver
 dbt_dev_gold
 ```
 
-The catalog contains:
+The catalog contains relation/column metadata only. It does **not** fetch sample rows.
 
-- schema names
-- layer (`silver` / `gold`)
-- relation names
-- relation type (`table` / `view`)
-- column names
-- column data types
+Bronze, `public`, `information_schema`, `pg_catalog`, and unrelated schemas are excluded.
 
-It does **not** fetch or expose sample rows.
+## Scope-aware SQL allowlisting
 
-Bronze, `public`, `information_schema`, `pg_catalog`, and other unrelated schemas are excluded.
+`utils/sql_safety.py` revalidates the catalog and uses SQLGlot scopes to distinguish physical relations, CTEs, and subqueries.
 
-## 2I.2 — Scope-aware SQL relation/schema allowlisting
-
-`utils/sql_safety.py` revalidates the catalog and uses SQLGlot scopes to distinguish:
-
-- physical PostgreSQL relations
-- CTEs
-- subqueries
-
-Governed SQL must satisfy all of the following:
+Governed SQL must be:
 
 - exactly one parsed query
-- read-only AST
-- no forbidden DML/DDL
-- every physical relation is schema-qualified
-- every physical schema exists in the governed catalog
-- every physical relation exists in the governed catalog
-- no cross-database references
-- no Bronze
-- no `public`
-- no `information_schema`
-- no `pg_catalog`
-- no `pg_*` system schemas
-- at least one approved Silver or Gold physical relation is referenced
+- read-only
+- schema-qualified for physical relations
+- limited to relations present in the governed catalog
+- free of cross-database references
+- free of Bronze/public/system-schema access
 
-CTEs may be referenced without schema qualification, but physical relations inside them must still be governed.
-
-The validator returns the approved physical relation identities as:
-
-```text
-referenced_relations
-```
-
-for downstream observability.
-
-## 2I.3 — One catalog snapshot for prompting and validation
-
-The SQL Agent loads one governed analytics catalog snapshot at prompt-building time.
-
-That same snapshot is stored in graph state and passed to `SQLSafetyValidator`.
-
-```text
-catalog loaded once
-      │
-      ├── serialize for LLM prompt
-      │
-      └── enforce in SQL validator
-```
-
-The validator does not perform a second catalog lookup.
-
-This keeps the LLM-visible schema context aligned with the deterministic enforcement boundary for that run.
-
-## 2I.4 — SQL execution observability
-
-`ExecutionRunStore` is shared by the ETL and SQL agents.
+## SQL execution observability
 
 SQL runs record safe structured events such as:
 
@@ -901,122 +915,318 @@ sql_safety
 sql_execution
 ```
 
-Successful safety metadata may include:
+Observability deliberately excludes user questions, generated SQL text, result row values, raw database error messages, and credentials.
 
-```text
-relation_count
-referenced_relations
-```
+## Phase 2I E2E
 
-Successful execution metadata may include:
-
-```text
-relation_count
-referenced_relations
-row_count
-column_count
-truncated
-duration
-```
-
-Failure metadata records only safe information such as:
-
-```text
-error_type
-```
-
-SQL observability deliberately excludes:
-
-- user questions
-- curated questions
-- generated SQL text
-- prompt text
-- result row values
-- raw database error messages
-- credentials
-
-Regression tests verify these privacy guarantees.
-
-## 2I.5 — Full end-to-end validation
-
-`phase_2i_e2e.py` exercises the complete stack using the Open Library public API.
-
-The test pipeline is:
-
-```text
-Open Library Search API
-        ↓
-record_path = docs
-        ↓
-Bronze: books_phase2i
-        ↓
-bronze.books_phase2i
-        ↓
-Silver: books_phase2i_clean
-        ↓
-dbt_dev_silver.stg_books_phase2i_clean
-        ↓
-Gold: books_phase2i_modern
-        ↓
-dbt_dev_gold.mart_books_phase2i_modern
-        ↓
-governed catalog
-        ↓
-natural-language analytical question
-        ↓
-generated SQL
-        ↓
-SQLGlot + relation allowlist
-        ↓
-read-only PostgreSQL
-        ↓
-natural-language answer
-```
-
-The current E2E request uses:
-
-```text
-https://openlibrary.org/search.json?q=machine%20learning&fields=key,title,first_publish_year,edition_count&limit=20&page=1
-```
-
-with records under:
-
-```text
-docs
-```
-
-The Gold transformation keeps books where:
-
-```text
-first_publish_year >= 2000
-edition_count >= 5
-```
-
-and the analytical question asks for the books ordered by highest edition count.
-
-A successful validation run confirmed:
-
-- 20 Bronze rows
-- 20 Silver rows
-- 4 Gold rows in that live API response
-- the SQL Agent selected `dbt_dev_gold.mart_books_phase2i_modern`
-- the SQL safety validator approved that exact governed relation
-- read-only execution returned the Gold rows
-- SQL observability recorded safe relation/row/column metadata
+`phase_2i_e2e.py` exercises the complete API → Bronze → PostgreSQL → dbt Silver/Gold → governed analytics stack using the Open Library public API.
 
 Because Open Library is a live external API, exact row contents and counts can change over time.
 
-Run the E2E locally with:
+Run it with:
 
 ```bash
 uv run python phase_2i_e2e.py
 ```
 
-Inspect the warehouse with:
+---
 
-```bash
-uv run python inspect_warehouse.py
+# Phase 2J — Incremental Warehouse Processing
+
+Phase 2J extends incremental semantics beyond file-backed ingestion and into the PostgreSQL/dbt path while preserving the project rule that deterministic code owns row identity, durability, merge SQL, and materialization configuration.
+
+Current repository status:
+
+```text
+2J.1   Typed business-key contracts               ✅
+2J.2   Incremental PostgreSQL Bronze merge/upsert ✅
+2J.3   Warehouse/checkpoint consistency           ✅
+2J.4   Governed dbt incremental materialization   ✅
+2J.5   Incremental lineage + observability        ✅
+2J.6A  Business-key-aware durable Bronze merge    ✅
+2J.6B  Real two-run PostgreSQL/dbt E2E            ⏳ final validation pending
 ```
+
+## 2J.1 — Typed business-key contracts
+
+Phase 2J introduces typed row-identity contracts through:
+
+```text
+models/warehouse_keys.py
+utils/business_keys.py
+```
+
+A `BusinessKeyContract` supports single-column and composite keys.
+
+Contracts are persisted under:
+
+```text
+data/_warehouse_keys/<dataset>.json
+```
+
+Key contracts are immutable by default because rebinding a dataset to a different key changes the meaning of row identity.
+
+Deterministic validation requires:
+
+- every key column exists
+- key values are non-null
+- business-key tuples are unique
+- duplicate key-column declarations are rejected
+- persisted content matches its SHA-256 fingerprint
+- persisted dataset binding matches the requested dataset
+
+Business-key errors expose aggregate diagnostics rather than raw row values.
+
+## 2J.2 — Incremental PostgreSQL Bronze merge/upsert
+
+`PostgresWarehouseLoader` now has two Bronze synchronization paths:
+
+```text
+no business key
+    → replace_bronze_table()
+    → refresh_in_place
+
+business key configured
+    → merge_bronze_table()
+    → merge_upsert
+```
+
+The keyed path:
+
+- revalidates the business-key contract
+- validates historical warehouse rows before enabling merge semantics
+- creates an application-controlled deterministic unique index
+- uses safely quoted Psycopg identifiers
+- uses `INSERT ... ON CONFLICT (...) DO UPDATE`
+- updates non-key columns only when values are actually distinct
+- supports all-key datasets through `DO NOTHING`
+- never `TRUNCATE`s or `DROP`s on the merge path
+- rolls back on failure
+
+Warehouse-sync metadata records:
+
+```text
+load_mode
+business_key_configured
+business_key_columns
+business_key_fingerprint
+```
+
+The dbt source registry tolerates these extra metadata fields while keeping the same metadata-version boundary.
+
+## 2J.3 — Warehouse/checkpoint consistency
+
+The project does **not** pretend that filesystem persistence and PostgreSQL share one distributed transaction.
+
+Instead, it uses explicit snapshot identity.
+
+`utils/data_layers.py` provides a SHA-256 fingerprint of the exact durable Bronze file.
+
+The Bronze checkpoint stores that fingerprint:
+
+```text
+checkpoint cursor
+      │
+      └── dataset_fingerprint
+```
+
+Warehouse synchronization then verifies:
+
+```text
+committed checkpoint
+      ↓
+expected Bronze fingerprint
+      ↓
+actual durable Bronze file
+      ↓
+warehouse sync
+      ↓
+re-check Bronze fingerprint
+      ↓
+warehouse_sync_metadata
+```
+
+If the Bronze file changes while the warehouse is synchronizing, PostgreSQL may already contain the snapshot that was read, but successful synchronization metadata is **not** advanced. A retry safely replays the synchronization.
+
+`DBTSourceRegistry` also rejects a warehouse source when the current Bronze fingerprint no longer matches the fingerprint from the last successful warehouse synchronization.
+
+This prevents stale PostgreSQL state from being advertised as current Bronze state.
+
+## 2J.4 — Governed dbt incremental materialization
+
+Incremental dbt behavior is decided by deterministic key-lineage analysis in:
+
+```text
+utils/dbt_incremental.py
+```
+
+The LLM supplies only a validated `DBTTransformPlan`.
+
+Deterministic code evaluates whether the transformation preserves one stable output row per business key.
+
+Examples of key-preserving behavior include:
+
+- identity transformations
+- projection that keeps all key columns
+- deterministic key renaming
+- non-key casting
+- non-key string transformations
+- non-key missing-value filling
+
+Operations that disable incremental eligibility include:
+
+- filtering
+- aggregation
+- dropping any business-key column
+- casting a business-key column
+- string-transforming a business-key column
+- otherwise mutating row identity
+
+Why filters are conservatively rejected:
+
+```text
+run 1: row satisfies filter → written to Gold
+run 2: same key no longer satisfies filter
+```
+
+If the model only processed the new filtered result, the old Gold row could remain stale. The safe fallback is therefore a full Gold table rebuild.
+
+Silver remains a view but persists safe key lineage in generated model metadata.
+
+Gold uses:
+
+```text
+safe key lineage
+    → materialized="incremental"
+    → application-controlled unique_key
+    → incremental_strategy="delete+insert"
+
+unsafe / no key lineage
+    → normal table materialization
+```
+
+The LLM cannot choose any of these dbt configuration values.
+
+## 2J.5 — Incremental lineage and observability
+
+Warehouse lineage now records the actual load mode instead of assuming every sync is a refresh.
+
+Safe warehouse lineage metadata includes:
+
+```text
+load_mode
+row_count
+column_count
+source_dataset_fingerprint
+checkpoint_bound
+business_key.configured
+business_key.column_count
+business_key.contract_fingerprint
+```
+
+dbt build lineage records:
+
+```text
+materialization
+incremental.eligible
+incremental.key_column_count
+```
+
+ETL execution observability also carries safe aggregate fields such as:
+
+```text
+materialization
+incremental_eligible
+incremental_key_column_count
+```
+
+Raw business-key values, row contents, compiled SQL, credentials, and unrestricted tool payloads are not persisted in these observability records.
+
+## 2J.6A — Business-key-aware durable Bronze merge
+
+The file-backed Bronze merge now aligns with warehouse row identity.
+
+Without a business-key contract:
+
+```text
+existing rows + incoming rows
+      ↓
+exact-row deduplication
+```
+
+With a business-key contract:
+
+```text
+existing Bronze
+      +
+incoming batch
+      ↓
+validate incoming key uniqueness
+      ↓
+drop duplicates by business key
+keep="last"
+      ↓
+incoming version wins
+      ↓
+validate final keyed snapshot
+```
+
+This supports a true update such as:
+
+```text
+run 1: id=1, name=Alice
+run 2: id=1, name=Alicia
+```
+
+without leaving two `id=1` rows in durable Bronze.
+
+Duplicate business keys **inside one incoming batch** are rejected rather than silently picking one, because the batch has no trusted row-version ordering contract.
+
+Regression coverage includes:
+
+- changed-key replacement
+- keyed retry idempotency
+- duplicate incoming-key rejection
+- no-key backward compatibility
+
+## 2J.6B — Final two-run E2E
+
+The remaining final validation should prove this complete two-run scenario using real PostgreSQL and real dbt while controlling the external API batches deterministically:
+
+```text
+RUN 1
+id=1  Alice    amount=10  updated_at=100
+id=2  Bob      amount=20  updated_at=100
+
+RUN 2
+id=1  Alicia   amount=15  updated_at=200   ← UPDATE
+id=3  Charlie  amount=30  updated_at=200   ← INSERT
+```
+
+Expected final state:
+
+```text
+1  Alicia   15  200
+2  Bob      20  100
+3  Charlie  30  200
+```
+
+The final E2E should verify:
+
+- run 2 receives run 1's watermark
+- checkpoint advances to the second watermark
+- durable Bronze contains exactly one row per business key
+- checkpoint fingerprint matches the final Bronze snapshot
+- PostgreSQL Bronze matches the durable Bronze snapshot
+- both warehouse syncs use `merge_upsert`
+- Silver remains a view
+- Gold is materialized incrementally when its plan preserves the key
+- incremental key lineage survives into Gold metadata
+- Gold lineage records incremental materialization
+- the governed SQL validator accepts the final Gold relation
+- read-only governed SQL returns the expected final three-row state
+
+A source watermark must represent updates—such as `updated_at` or a change version—not merely the business key itself. Otherwise an update to an older key may never be fetched.
 
 ---
 
@@ -1027,15 +1237,25 @@ uv run python inspect_warehouse.py
 ```text
 load checkpoint
       ↓
-extract API data
+extract API data using watermark
       ↓
 normalize records
       ↓
-merge with durable Bronze data
+load optional business-key contract
       ↓
 validate source schema transition
       ↓
+merge with durable Bronze
+      │
+      ├── no key → exact-row retry deduplication
+      │
+      └── key    → incoming row replaces same-key history
+      ↓
+validate keyed candidate when applicable
+      ↓
 atomic Bronze dataset save
+      ↓
+compute exact dataset SHA-256
       ↓
 schema history persistence
       ↓
@@ -1043,7 +1263,7 @@ atomic extraction metadata save
       ↓
 lineage persistence
       ↓
-checkpoint commit
+checkpoint commit bound to dataset fingerprint
 ```
 
 ## File-backed Silver / Gold promotion
@@ -1075,7 +1295,19 @@ deterministic quality evaluation
 ```text
 Bronze filesystem
       ↓
-refresh Bronze PostgreSQL relation in place
+validate checkpoint ↔ Bronze fingerprint binding
+      ↓
+warehouse synchronization
+      │
+      ├── no business key
+      │       ↓
+      │   refresh_in_place
+      │
+      └── business key
+              ↓
+          merge_upsert
+      ↓
+re-check Bronze fingerprint
       ↓
 persist warehouse sync metadata
       ↓
@@ -1086,6 +1318,8 @@ warehouse_sync lineage
 typed DBTTransformPlan
       ↓
 deterministic SQL compilation
+      ↓
+deterministic key-lineage analysis
       ↓
 persist model + model metadata
       ↓
@@ -1110,6 +1344,9 @@ Observability failure does not invalidate an otherwise successful data commit be
 data/_state/
     → incremental checkpoints
 
+data/_warehouse_keys/
+    → immutable typed business-key contracts
+
 data/_contracts/
     → persisted Silver/Gold quality contracts
 
@@ -1130,7 +1367,8 @@ data/gold/<dataset>/
     → file-backed Gold outputs
 
 dbt/generated_metadata/
-    → validated generated model metadata + plan fingerprints
+    → validated generated model metadata, plan fingerprints,
+      materialization metadata, incremental key lineage
 
 dbt/target/
     → ephemeral dbt execution artifacts consumed safely
@@ -1150,7 +1388,7 @@ dbt_dev_silver
 └── stg_<dataset>                # dbt view
 
 dbt_dev_gold
-└── mart_<dataset>               # dbt table
+└── mart_<dataset>               # dbt table or governed incremental table
 ```
 
 The Silver/Gold schema prefix is controlled by:
@@ -1215,6 +1453,7 @@ Autonomous-data-engineer-agent/
 ├── dbt/
 │   ├── dbt_project.yml
 │   ├── profiles.yml
+│   ├── generated_metadata/
 │   ├── models/
 │   │   ├── sources/
 │   │   ├── staging/
@@ -1225,16 +1464,19 @@ Autonomous-data-engineer-agent/
 │
 ├── models/
 │   ├── data_quality.py
-│   └── schema.py
+│   ├── schema.py
+│   └── warehouse_keys.py
 │
 ├── utils/
 │   ├── api_client.py
+│   ├── business_keys.py
 │   ├── data_layers.py
 │   ├── data_quality.py
 │   ├── data_quality_contracts.py
 │   ├── database.py
 │   ├── dbt_artifacts.py
 │   ├── dbt_execution.py
+│   ├── dbt_incremental.py
 │   ├── dbt_model_metadata.py
 │   ├── dbt_models.py
 │   ├── dbt_quality.py
@@ -1252,12 +1494,14 @@ Autonomous-data-engineer-agent/
 │
 ├── tests/
 │   ├── test_api_client.py
+│   ├── test_business_keys.py
 │   ├── test_data_layers.py
 │   ├── test_data_quality.py
 │   ├── test_data_quality_contracts.py
 │   ├── test_database.py
 │   ├── test_dbt_artifacts.py
 │   ├── test_dbt_execution.py
+│   ├── test_dbt_incremental.py
 │   ├── test_dbt_models.py
 │   ├── test_dbt_project.py
 │   ├── test_dbt_quality.py
@@ -1392,6 +1636,9 @@ Coverage includes:
 - authenticated API behavior
 - watermark-based incremental extraction
 - checkpoint durability and source/config binding
+- exact Bronze dataset fingerprints
+- checkpoint ↔ Bronze snapshot consistency
+- stale warehouse/dbt source rejection
 - schema drift classification
 - additive schema evolution
 - breaking-schema rejection
@@ -1405,10 +1652,23 @@ Coverage includes:
 - Bronze → PostgreSQL loading
 - PostgreSQL identifier safety
 - dependency-safe Bronze refresh
+- typed business-key validation
+- single and composite business keys
+- immutable business-key contract persistence
+- business-key contract fingerprint validation
+- keyed durable Bronze replacement
+- keyed retry idempotency
+- duplicate incoming-key rejection
+- PostgreSQL Bronze merge/upsert
+- no-TRUNCATE/no-DROP merge regression
 - dynamic dbt source generation
 - generated Silver models
 - generated Gold marts
 - deterministic `DBTTransformPlan` compilation
+- deterministic incremental key-lineage analysis
+- safe/unsafe incremental materialization decisions
+- composite dbt `unique_key` generation
+- table fallback for unsafe/no-key Gold plans
 - SQLGlot validation of generated dbt SQL
 - dbt model metadata fingerprints
 - dbt quality synchronization
@@ -1416,6 +1676,9 @@ Coverage includes:
 - dbt artifact parsing
 - dbt build → lineage linkage
 - dbt build → observability linkage
+- warehouse merge mode lineage
+- incremental materialization lineage
+- incremental observability privacy
 - governed analytics catalog
 - exclusion of sample rows from SQL LLM context
 - SQL AST write protection
@@ -1472,14 +1735,21 @@ The LLM does not directly control:
 - checkpoint persistence timing
 - source-schema compatibility decisions
 - schema-rejection policy
+- business-key validation
+- business-key contract fingerprints
+- physical business-key indexes
+- warehouse merge/upsert SQL
 - PostgreSQL credentials
 - arbitrary warehouse schemas
-- arbitrary Bronze table names outside the logical dataset mapping
 - destructive Bronze table replacement
 - dbt project/profile paths
 - arbitrary dbt selectors
 - arbitrary dbt CLI arguments
 - arbitrary dbt SQL/Jinja generation
+- dbt `materialized` configuration
+- dbt `unique_key`
+- dbt incremental strategy
+- incremental eligibility decisions
 - dbt artifact contents
 - lineage file contents
 - direct Bronze → Gold transitions
@@ -1500,7 +1770,17 @@ The LLM does not directly control:
 For dbt transformations:
 
 ```text
-LLM → validated DBTTransformPlan → deterministic SQL compiler → dbt
+LLM
+  ↓
+validated DBTTransformPlan
+  ↓
+deterministic SQL compiler
+  ↓
+deterministic incremental-safety decision
+  ↓
+application-controlled dbt config
+  ↓
+dbt
 ```
 
 For analytical SQL:
@@ -1513,9 +1793,11 @@ LLM → governed catalog → SQLGlot AST + relation allowlist → read-only Post
 
 # Current Limitations
 
-- incremental retry idempotency still uses exact-row equality rather than business-key upserts
-- Bronze warehouse synchronization currently uses full-table refresh-in-place rather than business-key incremental merge/upsert
-- dbt Gold models are currently rebuilt as tables rather than application-governed incremental models
+- business-key contracts exist as deterministic persisted application state but do not yet have a dedicated agent-facing configuration tool
+- the source watermark must capture updates (for example `updated_at` or a change version); using only a monotonically increasing business key cannot discover updates to older keys
+- keyed Bronze currently represents the latest snapshot per business key rather than maintaining slowly-changing-dimension history
+- explicit source deletions/tombstones are not yet modeled, so disappearance of a source row does not automatically delete it downstream
+- governed Gold incremental materialization is correct for key-preserving plans, but the generated query currently reads the complete Silver view rather than using an `is_incremental()` source-side change filter; this is a performance limitation, not a correctness blocker
 - breaking source schema changes are rejected rather than automatically migrated
 - optional fields disappearing from a whole batch may appear as schema removal
 - response-size limits are not yet enforced while streaming the HTTP body
@@ -1529,6 +1811,7 @@ LLM → governed catalog → SQLGlot AST + relation allowlist → read-only Post
 - quality rejections preserve aggregate diagnostics but do not provide row-level quarantine datasets
 - live-LLM evaluation and cost monitoring are not yet implemented
 - the Phase 2I E2E uses a live public API, so external API availability/content can change independently of the repository
+- the final real two-run Phase 2J PostgreSQL/dbt E2E is still pending in the current repository state
 
 ---
 
@@ -1628,54 +1911,49 @@ LLM → governed catalog → SQLGlot AST + relation allowlist → read-only Post
 - ✅ SQL observability privacy regression tests
 - ✅ full API → Bronze → dbt Silver/Gold → governed analytics E2E
 
+### Phase 2J — Incremental Warehouse Processing
+
+- ✅ typed immutable business-key contracts
+- ✅ single/composite key validation and fingerprints
+- ✅ business-key-aware durable Bronze updates
+- ✅ backward-compatible exact-row behavior for unkeyed datasets
+- ✅ PostgreSQL Bronze `merge_upsert`
+- ✅ deterministic unique business-key index
+- ✅ checkpoint ↔ Bronze dataset fingerprint binding
+- ✅ warehouse synchronization snapshot fingerprints
+- ✅ stale dbt source rejection
+- ✅ deterministic dbt incremental eligibility analysis
+- ✅ Silver key-lineage propagation
+- ✅ governed Gold incremental materialization
+- ✅ deterministic composite `unique_key` support
+- ✅ safe table fallback for filters/aggregations/key mutation
+- ✅ incremental warehouse/dbt lineage
+- ✅ privacy-preserving incremental observability
+- ⏳ final real two-run PostgreSQL/dbt E2E validation
+
 ---
 
 ## Next Planned Work
 
-### Phase 2J — Incremental Warehouse Processing
+### Finish Phase 2J validation
 
-The next planned phase extends incremental behavior beyond file-backed Bronze ingestion and into the warehouse/dbt path.
-
-Proposed direction:
+Run and persist the final deterministic two-run scenario proving:
 
 ```text
-2J.1  Typed business-key contracts
-2J.2  Incremental PostgreSQL Bronze merge/upsert
-2J.3  Warehouse/checkpoint consistency
-2J.4  Governed dbt incremental materialization
-2J.5  Incremental lineage + observability
-2J.6  Two-run incremental E2E validation
+update existing business key
++ insert new business key
++ preserve unchanged key
++ advance checkpoint
++ merge into PostgreSQL
++ incrementally build Gold
++ query final state through governed SQL
 ```
-
-Target architecture:
-
-```text
-External API
-      ↓
-watermark extraction
-      ↓
-durable Bronze state
-      ↓
-validated business key
-      ↓
-PostgreSQL merge/upsert
-      ├── insert new rows
-      ├── update changed rows
-      └── preserve unchanged rows
-      ↓
-dbt Silver
-      ↓
-governed incremental Gold
-      ↓
-governed SQL analytics
-```
-
-The same project principle remains:
-
-> **The LLM may decide which supported incremental workflow is needed. Deterministic code owns key validation, merge semantics, checkpoint durability, physical SQL, and dbt materialization configuration.**
 
 ### Later Candidates
 
+- source-side dbt incremental filtering with deterministic change predicates
+- explicit deletion/tombstone semantics
+- SCD/history-aware business-key processing
 - richer semantic/data contracts
 - row-level quarantine datasets
 - centralized tracing and metrics
