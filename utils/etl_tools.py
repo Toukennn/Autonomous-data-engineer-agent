@@ -46,6 +46,7 @@ from utils.schema_evolution import (
 
 from utils.data_layers import (
     DataLayer,
+    dataset_file_fingerprint,
     resolve_layer_dataset_directory,
     validate_dataset_name,
 )
@@ -694,6 +695,219 @@ class ETLTools:
         return self._warehouse_loader   
 
 
+    def _validate_bronze_checkpoint_binding(
+        self,
+        *,
+        dataset_name: str,
+        source_dataset_fingerprint: str,
+        extraction_metadata_file: Path,
+    ) -> tuple[
+        str | None,
+        str | None,
+    ]:
+        """
+        Verify that a committed incremental checkpoint,
+        when present, refers to the exact current durable
+        Bronze dataset snapshot.
+
+        Returns:
+
+            (
+                state_key,
+                checkpoint_dataset_fingerprint,
+            )
+
+        No watermark values are exposed.
+        """
+
+        if not extraction_metadata_file.exists():
+            return (
+                None,
+                None,
+            )
+
+        try:
+            with extraction_metadata_file.open(
+                "r",
+                encoding="utf-8",
+            ) as file:
+                extraction_metadata = (
+                    json.load(
+                        file
+                    )
+                )
+
+        except (
+            OSError,
+            json.JSONDecodeError,
+        ) as exc:
+            raise DatasetError(
+                "Failed to load Bronze "
+                "extraction metadata."
+            ) from exc
+
+        if not isinstance(
+            extraction_metadata,
+            dict,
+        ):
+            raise DatasetError(
+                "Bronze extraction metadata "
+                "must be a JSON object."
+            )
+
+        metadata_dataset = (
+            extraction_metadata.get(
+                "dataset_name"
+            )
+        )
+
+        if (
+            metadata_dataset
+            is not None
+            and validate_dataset_name(
+                metadata_dataset
+            )
+            != dataset_name
+        ):
+            raise DatasetError(
+                "Bronze extraction metadata "
+                "does not match the requested "
+                "dataset."
+            )
+
+        state_key = (
+            extraction_metadata.get(
+                "state_key"
+            )
+        )
+
+        if state_key is None:
+            return (
+                None,
+                None,
+            )
+
+        if (
+            not isinstance(
+                state_key,
+                str,
+            )
+            or not state_key.strip()
+        ):
+            raise DatasetError(
+                "Bronze extraction metadata "
+                "contains an invalid "
+                "incremental state key."
+            )
+
+        state_store = (
+            IncrementalStateStore(
+                self.data_root
+            )
+        )
+
+        state = state_store.load(
+            state_key
+        )
+
+        if state is None:
+
+            # If extraction discovered a next
+            # watermark, a committed checkpoint
+            # should exist.
+            if (
+                extraction_metadata.get(
+                    "next_watermark"
+                )
+                is not None
+            ):
+                raise DatasetError(
+                    "Bronze dataset has incremental "
+                    "metadata but its committed "
+                    "checkpoint is missing."
+                )
+
+            return (
+                state_key,
+                None,
+            )
+
+        state_metadata = (
+            state.get(
+                "metadata",
+                {}
+            )
+        )
+
+        if not isinstance(
+            state_metadata,
+            dict,
+        ):
+            raise DatasetError(
+                "Incremental checkpoint metadata "
+                "is invalid."
+            )
+
+        checkpoint_dataset = (
+            state_metadata.get(
+                "dataset_name"
+            )
+        )
+
+        if (
+            checkpoint_dataset
+            is not None
+            and checkpoint_dataset
+            != dataset_name
+        ):
+            raise DatasetError(
+                "Incremental checkpoint is bound "
+                "to a different Bronze dataset."
+            )
+
+        checkpoint_dataset_fingerprint = (
+            state_metadata.get(
+                "dataset_fingerprint"
+            )
+        )
+
+        # Older checkpoints created before 2J.3
+        # remain readable.
+        if (
+            checkpoint_dataset_fingerprint
+            is None
+        ):
+            return (
+                state_key,
+                None,
+            )
+
+        if not isinstance(
+            checkpoint_dataset_fingerprint,
+            str,
+        ):
+            raise DatasetError(
+                "Incremental checkpoint contains "
+                "an invalid dataset fingerprint."
+            )
+
+        if (
+            checkpoint_dataset_fingerprint
+            != source_dataset_fingerprint
+        ):
+            raise DatasetError(
+                "Bronze dataset does not match "
+                "the last committed incremental "
+                "checkpoint. Retry extraction "
+                "before warehouse synchronization."
+            )
+
+        return (
+            state_key,
+            checkpoint_dataset_fingerprint,
+        )
+
+
     def load_bronze_to_warehouse(
         self,
         *,
@@ -745,6 +959,31 @@ class ETLTools:
             )
         )
 
+        bronze_directory = (
+            resolve_layer_dataset_directory(
+                data_root=(
+                    self.data_root
+                ),
+                layer=(
+                    DataLayer.BRONZE
+                ),
+                dataset_name=(
+                    safe_dataset_name
+                ),
+            )
+        )
+
+        extraction_metadata_file = (
+            bronze_directory
+            / "extraction_metadata.json"
+        )
+
+        source_dataset_fingerprint = (
+            dataset_file_fingerprint(
+                source_file
+            )
+        )
+
         # ============================================================
         # LOAD BRONZE DATAFRAME
         # ============================================================
@@ -754,6 +993,39 @@ class ETLTools:
                 str(
                     source_file
                 )
+            )
+        )
+
+        fingerprint_after_read = (
+            dataset_file_fingerprint(
+                source_file
+            )
+        )
+
+        if (
+            fingerprint_after_read
+            != source_dataset_fingerprint
+        ):
+            raise DatasetError(
+                "Bronze dataset changed while "
+                "warehouse synchronization was "
+                "reading it. Retry the operation."
+            )
+
+        (
+            source_checkpoint_state_key,
+            source_checkpoint_dataset_fingerprint,
+        ) = (
+            self._validate_bronze_checkpoint_binding(
+                dataset_name=(
+                    safe_dataset_name
+                ),
+                source_dataset_fingerprint=(
+                    source_dataset_fingerprint
+                ),
+                extraction_metadata_file=(
+                    extraction_metadata_file
+                ),
             )
         )
 
@@ -858,6 +1130,25 @@ class ETLTools:
             )
         )
 
+        fingerprint_after_warehouse_commit = (
+            dataset_file_fingerprint(
+                source_file
+            )
+        )
+
+        if (
+            fingerprint_after_warehouse_commit
+            != source_dataset_fingerprint
+        ):
+            raise DatasetError(
+                "Bronze dataset changed during "
+                "warehouse synchronization. "
+                "PostgreSQL may contain the snapshot "
+                "that was read, but successful "
+                "warehouse-sync metadata was not "
+                "advanced. Retry synchronization."
+            )
+
         metadata_file = (
             bronze_directory
             / "warehouse_sync_metadata.json"
@@ -930,6 +1221,15 @@ class ETLTools:
             ),
             "columns": list(
                 result.columns
+            ),
+            "source_dataset_fingerprint": (
+                source_dataset_fingerprint
+            ),
+            "source_checkpoint_state_key": (
+                source_checkpoint_state_key
+            ),
+            "source_checkpoint_dataset_fingerprint": (
+                source_checkpoint_dataset_fingerprint
             ),
         }
 
@@ -2228,6 +2528,12 @@ class ETLTools:
             file_format=file_format,
         )
 
+        current_dataset_fingerprint = (
+            dataset_file_fingerprint(
+                output_file
+            )
+)
+
         # ============================================================
         # SCHEMA HISTORY
         # ============================================================
@@ -2287,6 +2593,9 @@ class ETLTools:
                     "incremental"
                     if incremental_enabled
                     else "full"
+                ),
+                "dataset_fingerprint": (
+                    current_dataset_fingerprint
                 ),
             }
         )
@@ -2368,6 +2677,9 @@ class ETLTools:
                             "schema_evolution_policy": (
                                 self.SCHEMA_EVOLUTION_POLICY
                             ),
+                            "dataset_fingerprint": (
+                                current_dataset_fingerprint
+                            ),
                         },
                     )
                 )
@@ -2399,6 +2711,8 @@ class ETLTools:
             f"\nData layer: "
             f"{DataLayer.BRONZE.value}"
             f"\nLineage event: {lineage_event_id}"
+            f"\nDataset fingerprint: "
+            f"{current_dataset_fingerprint}"
         )
 
         if incremental_enabled:

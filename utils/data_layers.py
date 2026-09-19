@@ -4,6 +4,7 @@ from pathlib import Path
 
 from utils.exceptions import DatasetError
 
+import hashlib
 
 class DataLayer(str, Enum):
     """
@@ -142,3 +143,51 @@ def resolve_layer_dataset_directory(
         ) from exc
 
     return dataset_directory
+
+
+def dataset_file_fingerprint(
+    file_path: Path,
+) -> str:
+    """
+    Return a stable SHA-256 fingerprint of the
+    exact durable dataset file.
+
+    This identifies a concrete dataset snapshot,
+    not merely its schema.
+    """
+
+    path = file_path.resolve()
+
+    if not path.is_file():
+        raise DatasetError(
+            "Dataset file does not exist "
+            "for fingerprinting."
+        )
+
+    hasher = hashlib.sha256()
+
+    try:
+        with path.open(
+            "rb"
+        ) as file:
+
+            while True:
+
+                chunk = file.read(
+                    1024 * 1024
+                )
+
+                if not chunk:
+                    break
+
+                hasher.update(
+                    chunk
+                )
+
+    except OSError as exc:
+        raise DatasetError(
+            "Failed to fingerprint "
+            "dataset file."
+        ) from exc
+
+    return hasher.hexdigest()

@@ -3,8 +3,10 @@ from pathlib import Path
 
 from utils.data_layers import (
     DataLayer,
+    dataset_file_fingerprint,
     validate_dataset_name,
 )
+
 from utils.exceptions import (
     DatasetError,
 )
@@ -198,6 +200,81 @@ class DBTSourceRegistry:
                 "Warehouse synchronization metadata "
                 "is missing its schema fingerprint."
             )
+
+
+        source_dataset_fingerprint = (
+            metadata.get(
+                "source_dataset_fingerprint"
+            )
+        )
+
+        # Backwards compatibility for metadata
+        # generated before Phase 2J.3.
+        if (
+            source_dataset_fingerprint
+            is not None
+        ):
+
+            if (
+                not isinstance(
+                    source_dataset_fingerprint,
+                    str,
+                )
+                or not source_dataset_fingerprint
+            ):
+                raise DatasetError(
+                    "Warehouse synchronization metadata "
+                    "contains an invalid dataset "
+                    "fingerprint."
+                )
+
+            source_file = (
+                metadata.get(
+                    "source_file"
+                )
+            )
+
+            if not isinstance(
+                source_file,
+                str,
+            ):
+                raise DatasetError(
+                    "Warehouse synchronization metadata "
+                    "is missing its Bronze source file."
+                )
+
+            source_path = (
+                self.data_root
+                / source_file
+            ).resolve()
+
+            try:
+                source_path.relative_to(
+                    self.data_root
+                )
+
+            except ValueError as exc:
+                raise DatasetError(
+                    "Warehouse synchronization source "
+                    "escaped the configured data "
+                    "directory."
+                ) from exc
+
+            actual_fingerprint = (
+                dataset_file_fingerprint(
+                    source_path
+                )
+            )
+
+            if (
+                actual_fingerprint
+                != source_dataset_fingerprint
+            ):
+                raise DatasetError(
+                    "Bronze dataset has changed since "
+                    "its last successful warehouse "
+                    "synchronization."
+                )
 
         return metadata
 
