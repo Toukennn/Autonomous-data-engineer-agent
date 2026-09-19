@@ -29,6 +29,18 @@ class DBTModelMetadata:
     output_columns: tuple[str, ...]
     plan_fingerprint: str
     plan: DBTTransformPlan
+
+    materialization: str
+
+    incremental_eligible: bool
+
+    incremental_key_columns: tuple[
+        str,
+        ...
+    ]
+
+    incremental_reason: str
+
     metadata_file: Path
 
 
@@ -190,6 +202,13 @@ class DBTModelMetadataStore:
         input_columns: list[str],
         output_columns: list[str],
         plan: DBTTransformPlan,
+        materialization: str | None = None,
+        incremental_eligible: bool = False,
+        incremental_key_columns: (
+            list[str]
+            | None
+        ) = None,
+        incremental_reason: str = "",
     ) -> Path:
         safe_dataset = (
             validate_dataset_name(
@@ -219,6 +238,90 @@ class DBTModelMetadataStore:
         self._validate_columns(
             output_columns
         )
+
+        resolved_materialization = (
+            materialization
+            if materialization is not None
+            else (
+                "view"
+                if layer
+                == DataLayer.SILVER
+                else "table"
+            )
+        )
+
+        allowed_materializations = {
+            DataLayer.SILVER: {
+                "view",
+            },
+            DataLayer.GOLD: {
+                "table",
+                "incremental",
+            },
+        }
+
+        if (
+            resolved_materialization
+            not in allowed_materializations[
+                layer
+            ]
+        ):
+            raise DatasetError(
+                "Invalid dbt materialization "
+                "for model metadata."
+            )
+
+        resolved_incremental_keys = list(
+            incremental_key_columns
+            or []
+        )
+
+        if resolved_incremental_keys:
+
+            self._validate_columns(
+                resolved_incremental_keys
+            )
+
+        if (
+            incremental_eligible
+            and not resolved_incremental_keys
+        ):
+            raise DatasetError(
+                "Incremental-eligible dbt metadata "
+                "requires at least one key column."
+            )
+
+        if (
+            not incremental_eligible
+            and resolved_incremental_keys
+        ):
+            raise DatasetError(
+                "Non-incremental dbt metadata cannot "
+                "contain incremental key columns."
+            )
+
+        missing_incremental_keys = [
+            column
+            for column
+            in resolved_incremental_keys
+            if column
+            not in output_columns
+        ]
+
+        if missing_incremental_keys:
+            raise DatasetError(
+                "Incremental key columns must exist "
+                "in dbt model output columns."
+            )
+
+        if not isinstance(
+            incremental_reason,
+            str,
+        ):
+            raise DatasetError(
+                "Incremental decision reason "
+                "must be a string."
+            )
 
         metadata_file = (
             self._metadata_file(
@@ -260,6 +363,20 @@ class DBTModelMetadataStore:
             "plan": plan.model_dump(
                 mode="json"
             ),
+            "materialization": (
+                resolved_materialization
+            ),
+            "incremental": {
+                "eligible": (
+                    incremental_eligible
+                ),
+                "key_columns": (
+                    resolved_incremental_keys
+                ),
+                "reason": (
+                    incremental_reason
+                ),
+            },
         }
 
         temp_file = (
@@ -477,6 +594,150 @@ class DBTModelMetadataStore:
             )
         )
 
+        materialization = (
+            payload.get(
+                "materialization"
+            )
+        )
+
+        # Backward compatibility with metadata
+        # generated before Phase 2J.4B.
+        if materialization is None:
+
+            materialization = (
+                "view"
+                if layer
+                == DataLayer.SILVER
+                else "table"
+            )
+
+        allowed_materializations = {
+            DataLayer.SILVER: {
+                "view",
+            },
+            DataLayer.GOLD: {
+                "table",
+                "incremental",
+            },
+        }
+
+        if (
+            materialization
+            not in allowed_materializations[
+                layer
+            ]
+        ):
+            raise DatasetError(
+                "Invalid persisted dbt "
+                "materialization."
+            )
+
+
+        incremental_payload = (
+            payload.get(
+                "incremental"
+            )
+        )
+
+        if incremental_payload is None:
+
+            incremental_eligible = False
+            incremental_key_columns = []
+            incremental_reason = (
+                "Metadata predates incremental "
+                "key-lineage tracking."
+            )
+
+        else:
+
+            if not isinstance(
+                incremental_payload,
+                dict,
+            ):
+                raise DatasetError(
+                    "Invalid persisted dbt "
+                    "incremental metadata."
+                )
+
+            incremental_eligible = (
+                incremental_payload.get(
+                    "eligible"
+                )
+            )
+
+            incremental_key_columns = (
+                incremental_payload.get(
+                    "key_columns"
+                )
+            )
+
+            incremental_reason = (
+                incremental_payload.get(
+                    "reason"
+                )
+            )
+
+            if not isinstance(
+                incremental_eligible,
+                bool,
+            ):
+                raise DatasetError(
+                    "Invalid persisted incremental "
+                    "eligibility value."
+                )
+
+            if not isinstance(
+                incremental_key_columns,
+                list,
+            ):
+                raise DatasetError(
+                    "Invalid persisted incremental "
+                    "key columns."
+                )
+
+            if not isinstance(
+                incremental_reason,
+                str,
+            ):
+                raise DatasetError(
+                    "Invalid persisted incremental "
+                    "decision reason."
+                )
+
+            if incremental_key_columns:
+                self._validate_columns(
+                    incremental_key_columns
+                )
+
+            if (
+                incremental_eligible
+                and not incremental_key_columns
+            ):
+                raise DatasetError(
+                    "Incremental-eligible metadata "
+                    "is missing its key columns."
+                )
+
+            if (
+                not incremental_eligible
+                and incremental_key_columns
+            ):
+                raise DatasetError(
+                    "Non-incremental metadata "
+                    "contains incremental keys."
+                )
+
+            if any(
+                column
+                not in output_columns
+                for column
+                in incremental_key_columns
+            ):
+                raise DatasetError(
+                    "Persisted incremental key "
+                    "does not exist in model output."
+                )
+
         return DBTModelMetadata(
             layer=layer,
             dataset_name=(
@@ -499,6 +760,23 @@ class DBTModelMetadataStore:
                 fingerprint
             ),
             plan=plan,
+
+            materialization=(
+                materialization
+            ),
+
+            incremental_eligible=(
+                incremental_eligible
+            ),
+
+            incremental_key_columns=tuple(
+                incremental_key_columns
+            ),
+
+            incremental_reason=(
+                incremental_reason
+            ),
+
             metadata_file=(
                 metadata_file
             ),

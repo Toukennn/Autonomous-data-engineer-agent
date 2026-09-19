@@ -1,5 +1,6 @@
 import hashlib
 import re
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -410,6 +411,13 @@ class DBTGoldModelResult:
     model_file: Path
     output_columns: tuple[str, ...]
 
+    materialization: str
+
+    incremental_key_columns: tuple[
+        str,
+        ...
+    ]
+
 
 class DBTGoldModelManager:
     """
@@ -623,6 +631,10 @@ class DBTGoldModelManager:
         input_columns: list[str],
         plan: DBTTransformPlan,
         target_dataset: str | None = None,
+        incremental_key_columns: (
+            list[str]
+            | None
+        ) = None,
     ) -> DBTGoldModelResult:
         safe_source = (
             validate_dataset_name(
@@ -676,6 +688,53 @@ class DBTGoldModelManager:
             )
         )
 
+        resolved_incremental_keys = list(
+            incremental_key_columns
+            or []
+        )
+
+        if resolved_incremental_keys:
+
+            DBTSilverModelManager\
+                ._validate_columns(
+                    resolved_incremental_keys
+                )
+
+            missing_keys = [
+                column
+                for column
+                in resolved_incremental_keys
+                if column
+                not in compiled.output_columns
+            ]
+
+            if missing_keys:
+                raise DatasetError(
+                    "Incremental Gold key columns "
+                    "are missing from model output."
+                )
+
+            model_sql = (
+                self._render_incremental_config(
+                    resolved_incremental_keys
+                )
+                + compiled.sql
+            )
+
+            materialization = (
+                "incremental"
+            )
+
+        else:
+
+            model_sql = (
+                compiled.sql
+            )
+
+            materialization = (
+                "table"
+            )
+
         temp_file = (
             model_file.with_name(
                 f".{model_file.name}.tmp"
@@ -689,7 +748,7 @@ class DBTGoldModelManager:
             )
 
             temp_file.write_text(
-                compiled.sql,
+                model_sql,
                 encoding="utf-8",
             )
 
@@ -725,8 +784,13 @@ class DBTGoldModelManager:
             output_columns=(
                 compiled.output_columns
             ),
+            materialization=(
+                materialization
+            ),
+            incremental_key_columns=tuple(
+                resolved_incremental_keys
+            ),
         )
-
 
     def model_file_for_dataset(
         self,
@@ -746,4 +810,31 @@ class DBTGoldModelManager:
         return (
             self.marts_directory
             / f"{model_name}.sql"
+        )
+
+
+    @staticmethod
+    def _render_incremental_config(
+        key_columns: list[str],
+    ) -> str:
+        """
+        Render application-controlled dbt incremental
+        configuration.
+
+        The LLM never supplies these values.
+        """
+
+        serialized_keys = (
+            json.dumps(
+                key_columns,
+                ensure_ascii=False,
+            )
+        )
+
+        return (
+            "{{ config(\n"
+            '    materialized="incremental",\n'
+            f"    unique_key={serialized_keys},\n"
+            '    incremental_strategy="delete+insert"\n'
+            ") }}\n\n"
         )

@@ -1,5 +1,6 @@
 import pytest
 
+from models.schema import DBTTransformPlan
 from utils.dbt_models import (
     DBTGoldModelManager,
     DBTSilverModelManager,
@@ -293,4 +294,166 @@ def test_gold_model_name_respects_postgres_limit(
             )
         )
         <= 63
+    )
+
+
+def test_gold_model_uses_incremental_materialization_with_safe_key(
+    tmp_path,
+):
+    dbt_root = (
+        tmp_path
+        / "dbt"
+    )
+
+    manager = (
+        DBTGoldModelManager(
+            dbt_project_dir=(
+                dbt_root
+            )
+        )
+    )
+
+    result = (
+        manager.create_from_plan(
+            source_dataset="orders",
+            source_model_name=(
+                "stg_orders"
+            ),
+            input_columns=[
+                "order_id",
+                "amount",
+            ],
+            plan=(
+                DBTTransformPlan()
+            ),
+            incremental_key_columns=[
+                "order_id"
+            ],
+        )
+    )
+
+    sql = (
+        result.model_file
+        .read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert (
+        result.materialization
+        == "incremental"
+    )
+
+    assert (
+        result.incremental_key_columns
+        == (
+            "order_id",
+        )
+    )
+
+    assert (
+        'materialized="incremental"'
+        in sql
+    )
+
+    assert (
+        'unique_key=["order_id"]'
+        in sql
+    )
+
+    assert (
+        'incremental_strategy="delete+insert"'
+        in sql
+    )
+
+
+def test_gold_model_without_safe_key_remains_table(
+    tmp_path,
+):
+    manager = (
+        DBTGoldModelManager(
+            dbt_project_dir=(
+                tmp_path
+                / "dbt"
+            )
+        )
+    )
+
+    result = (
+        manager.create_from_plan(
+            source_dataset="orders",
+            source_model_name=(
+                "stg_orders"
+            ),
+            input_columns=[
+                "order_id",
+                "amount",
+            ],
+            plan=(
+                DBTTransformPlan()
+            ),
+        )
+    )
+
+    sql = (
+        result.model_file
+        .read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert (
+        result.materialization
+        == "table"
+    )
+
+    assert (
+        "materialized="
+        not in sql
+    )
+
+
+def test_gold_incremental_model_supports_composite_key(
+    tmp_path,
+):
+    manager = (
+        DBTGoldModelManager(
+            dbt_project_dir=(
+                tmp_path
+                / "dbt"
+            )
+        )
+    )
+
+    result = (
+        manager.create_from_plan(
+            source_dataset="order_lines",
+            source_model_name=(
+                "stg_order_lines"
+            ),
+            input_columns=[
+                "order_id",
+                "line_id",
+                "amount",
+            ],
+            plan=(
+                DBTTransformPlan()
+            ),
+            incremental_key_columns=[
+                "order_id",
+                "line_id",
+            ],
+        )
+    )
+
+    sql = (
+        result.model_file
+        .read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert (
+        'unique_key=["order_id", "line_id"]'
+        in sql
     )

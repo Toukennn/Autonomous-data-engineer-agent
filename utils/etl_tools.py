@@ -99,6 +99,10 @@ from utils.business_keys import (
     validate_business_key,
 )
 
+from utils.dbt_incremental import (
+    derive_incremental_key,
+)
+
 @dataclass(
     frozen=True
 )
@@ -4363,6 +4367,120 @@ class ETLTools:
             ensure_ascii=False,
         )
 
+    def _registered_bronze_business_key(
+        self,
+        *,
+        dataset_name: str,
+        source_metadata: dict,
+    ) -> list[str]:
+        """
+        Resolve and verify the persisted business key
+        associated with one registered Bronze source.
+
+        Warehouse-sync metadata and the immutable key
+        contract must agree.
+        """
+
+        configured = (
+            source_metadata.get(
+                "business_key_configured",
+                False,
+            )
+        )
+
+        # Legacy/non-keyed Bronze sources.
+        if configured is False:
+            return []
+
+        if configured is not True:
+            raise DatasetError(
+                "Registered Bronze source contains "
+                "invalid business-key metadata."
+            )
+
+        metadata_columns = (
+            source_metadata.get(
+                "business_key_columns"
+            )
+        )
+
+        metadata_fingerprint = (
+            source_metadata.get(
+                "business_key_fingerprint"
+            )
+        )
+
+        if (
+            not isinstance(
+                metadata_columns,
+                list,
+            )
+            or not metadata_columns
+        ):
+            raise DatasetError(
+                "Registered Bronze source is missing "
+                "its business-key columns."
+            )
+
+        if (
+            not isinstance(
+                metadata_fingerprint,
+                str,
+            )
+            or not metadata_fingerprint
+        ):
+            raise DatasetError(
+                "Registered Bronze source is missing "
+                "its business-key fingerprint."
+            )
+
+        contract = (
+            self.business_key_contract_store
+            .load(
+                dataset_name=(
+                    dataset_name
+                )
+            )
+        )
+
+        if contract is None:
+            raise DatasetError(
+                "Registered Bronze source refers to "
+                "a missing business-key contract."
+            )
+
+        actual_fingerprint = (
+            business_key_fingerprint(
+                contract
+            )
+        )
+
+        if (
+            actual_fingerprint
+            != metadata_fingerprint
+        ):
+            raise DatasetError(
+                "Registered Bronze business-key "
+                "fingerprint does not match its "
+                "persisted contract."
+            )
+
+        if (
+            list(
+                contract.columns
+            )
+            != metadata_columns
+        ):
+            raise DatasetError(
+                "Registered Bronze business-key "
+                "columns do not match their "
+                "persisted contract."
+            )
+
+        return list(
+            contract.columns
+        )
+
 
     def create_dbt_silver_model(
         self,
@@ -4413,6 +4531,27 @@ class ETLTools:
             else DBTTransformPlan()
         )
 
+        input_key_columns = (
+            self._registered_bronze_business_key(
+                dataset_name=(
+                    safe_source
+                ),
+                source_metadata=(
+                    source_metadata
+                ),
+            )
+        )
+
+        incremental_decision = (
+            derive_incremental_key(
+                plan=effective_plan,
+                input_columns=columns,
+                input_key_columns=(
+                    input_key_columns
+                ),
+            )
+        )
+
         result = (
             self.dbt_silver_model_manager
             .create_from_plan(
@@ -4446,6 +4585,16 @@ class ETLTools:
                     result.output_columns
                 ),
                 plan=effective_plan,
+                materialization="view",
+                incremental_eligible=(
+                    incremental_decision.eligible
+                ),
+                incremental_key_columns=list(
+                    incremental_decision.key_columns
+                ),
+                incremental_reason=(
+                    incremental_decision.reason
+                ),
             )
         )
 
@@ -4570,6 +4719,30 @@ class ETLTools:
             else DBTTransformPlan()
         )
 
+        silver_key_columns = (
+            list(
+                silver_metadata
+                .incremental_key_columns
+            )
+            if (
+                silver_metadata
+                .incremental_eligible
+            )
+            else []
+        )
+
+        incremental_decision = (
+            derive_incremental_key(
+                plan=effective_plan,
+                input_columns=(
+                    input_columns
+                ),
+                input_key_columns=(
+                    silver_key_columns
+                ),
+            )
+        )
+
         result = (
             self.dbt_gold_model_manager
             .create_from_plan(
@@ -4586,6 +4759,17 @@ class ETLTools:
                     input_columns
                 ),
                 plan=effective_plan,
+                incremental_key_columns=(
+                    list(
+                        incremental_decision
+                        .key_columns
+                    )
+                    if (
+                        incremental_decision
+                        .eligible
+                    )
+                    else None
+                ),
             )
         )
 
@@ -4612,6 +4796,18 @@ class ETLTools:
                     result.output_columns
                 ),
                 plan=effective_plan,
+                materialization=(
+                    result.materialization
+                ),
+                incremental_eligible=(
+                    incremental_decision.eligible
+                ),
+                incremental_key_columns=list(
+                    incremental_decision.key_columns
+                ),
+                incremental_reason=(
+                    incremental_decision.reason
+                ),
             )
         )
 
@@ -4656,6 +4852,12 @@ class ETLTools:
             f"Model metadata: {metadata_file}\n"
             f"Quality contract: "
             f"{'configured' if quality_sync.contract_configured else 'not configured'}"
+            f"Materialization: "
+            f"{result.materialization}\n"
+            f"Incremental eligible: "
+            f"{incremental_decision.eligible}\n"
+            f"Incremental key: "
+            f"{list(incremental_decision.key_columns)}\n"
         )
 
     def _get_dbt_executor(
