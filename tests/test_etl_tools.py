@@ -37,6 +37,7 @@ from models.data_quality import (
 
 from utils.data_layers import (
     DataLayer,
+    dataset_file_fingerprint,
 )
 
 from utils.exceptions import (
@@ -628,6 +629,50 @@ def test_incremental_checkpoint_advances_after_save(
     assert (
         state["cursor_value"]
         == 102
+    )
+
+    dataset_file = (
+        isolated_etl_tools.data_root
+        / "bronze"
+        / "orders"
+        / "extracted_data.csv"
+    )
+
+    metadata_file = (
+        isolated_etl_tools.data_root
+        / "bronze"
+        / "orders"
+        / "extraction_metadata.json"
+    )
+
+    with metadata_file.open(
+        "r",
+        encoding="utf-8",
+    ) as file:
+        extraction_metadata = (
+            json.load(
+                file
+            )
+        )
+
+    expected_fingerprint = (
+        dataset_file_fingerprint(
+            dataset_file
+        )
+    )
+
+    assert (
+        extraction_metadata[
+            "dataset_fingerprint"
+        ]
+        == expected_fingerprint
+    )
+
+    assert (
+        state["metadata"][
+            "dataset_fingerprint"
+        ]
+        == expected_fingerprint
     )
 
 
@@ -4017,5 +4062,194 @@ def test_warehouse_bridge_rejects_invalid_business_key_before_database_write(
 
     assert (
         warehouse.calls
+        == []
+    )
+
+
+def test_warehouse_bridge_rejects_checkpoint_fingerprint_mismatch(
+    isolated_etl_tools,
+):
+    bronze_directory = (
+        isolated_etl_tools.data_root
+        / "bronze"
+        / "orders"
+    )
+
+    bronze_directory.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    source_file = (
+        bronze_directory
+        / "extracted_data.csv"
+    )
+
+    pd.DataFrame(
+        {
+            "order_id": [
+                1,
+                2,
+            ],
+            "amount": [
+                10,
+                20,
+            ],
+        }
+    ).to_csv(
+        source_file,
+        index=False,
+    )
+
+    # Tell the warehouse bridge this Bronze
+    # dataset belongs to an incremental state.
+    extraction_metadata = {
+        "dataset_name": "orders",
+        "state_key": "orders_api",
+        "next_watermark": 2,
+    }
+
+    with (
+        bronze_directory
+        / "extraction_metadata.json"
+    ).open(
+        "w",
+        encoding="utf-8",
+    ) as file:
+        json.dump(
+            extraction_metadata,
+            file,
+        )
+
+    store = IncrementalStateStore(
+        isolated_etl_tools.data_root
+    )
+
+    store.save(
+        "orders_api",
+        cursor_value=2,
+        metadata={
+            "dataset_name": "orders",
+            "dataset_fingerprint": (
+                "0" * 64
+            ),
+        },
+    )
+
+    warehouse = (
+        FakeWarehouseLoader()
+    )
+
+    isolated_etl_tools\
+        ._warehouse_loader = (
+            warehouse
+        )
+
+    with pytest.raises(
+        DatasetError,
+        match=(
+            "does not match the last "
+            "committed incremental checkpoint"
+        ),
+    ):
+        isolated_etl_tools\
+            .load_bronze_to_warehouse(
+                dataset_name="orders",
+            )
+
+    # Critical invariant:
+    # reject BEFORE touching PostgreSQL.
+    assert warehouse.calls == []
+
+
+def test_bronze_change_during_warehouse_sync_is_not_marked_successful(
+    isolated_etl_tools,
+    monkeypatch,
+):
+    bronze_directory = (
+        isolated_etl_tools.data_root
+        / "bronze"
+        / "orders"
+    )
+
+    bronze_directory.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    pd.DataFrame(
+        {
+            "order_id": [
+                1
+            ],
+            "amount": [
+                10
+            ],
+        }
+    ).to_csv(
+        bronze_directory
+        / "extracted_data.csv",
+        index=False,
+    )
+
+    warehouse = (
+        FakeWarehouseLoader()
+    )
+
+    isolated_etl_tools\
+        ._warehouse_loader = (
+            warehouse
+        )
+
+    fingerprints = iter(
+        [
+            "a" * 64,
+            "a" * 64,
+            "b" * 64,
+        ]
+    )
+
+    monkeypatch.setattr(
+        "utils.etl_tools.dataset_file_fingerprint",
+        lambda file_path: next(
+            fingerprints
+        ),
+    )
+
+    with pytest.raises(
+        DatasetError,
+        match=(
+            "changed during warehouse "
+            "synchronization"
+        ),
+    ):
+        isolated_etl_tools\
+            .load_bronze_to_warehouse(
+                dataset_name="orders",
+            )
+
+    # Database synchronization happened.
+    assert (
+        len(
+            warehouse.calls
+        )
+        == 1
+    )
+
+    # But it must NOT be advertised
+    # as successfully current.
+    metadata_file = (
+        bronze_directory
+        / "warehouse_sync_metadata.json"
+    )
+
+    assert (
+        not metadata_file.exists()
+    )
+
+    assert (
+        isolated_etl_tools
+        .lineage_store
+        .get_events()
         == []
     )

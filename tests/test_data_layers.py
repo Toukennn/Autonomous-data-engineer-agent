@@ -2,9 +2,11 @@ import pytest
 
 from utils.data_layers import (
     DataLayer,
+    dataset_file_fingerprint,
     resolve_layer_dataset_directory,
     validate_dataset_name,
 )
+
 from utils.exceptions import DatasetError
 
 
@@ -91,3 +93,58 @@ def test_different_layers_have_different_roots(
     )
 
     assert bronze != silver
+
+
+def test_dataset_file_fingerprint_is_stable(
+    tmp_path,
+):
+    file_path = (
+        tmp_path
+        / "dataset.csv"
+    )
+
+    file_path.write_text(
+        "id,name\n1,Alice\n",
+        encoding="utf-8",
+    )
+
+    first = dataset_file_fingerprint(
+        file_path
+    )
+
+    second = dataset_file_fingerprint(
+        file_path
+    )
+
+    assert first == second
+
+    assert len(first) == 64
+
+
+def test_dataset_file_fingerprint_changes_with_content(
+    tmp_path,
+):
+    file_path = (
+        tmp_path
+        / "dataset.csv"
+    )
+
+    file_path.write_text(
+        "id,name\n1,Alice\n",
+        encoding="utf-8",
+    )
+
+    first = dataset_file_fingerprint(
+        file_path
+    )
+
+    file_path.write_text(
+        "id,name\n1,Bob\n",
+        encoding="utf-8",
+    )
+
+    second = dataset_file_fingerprint(
+        file_path
+    )
+
+    assert first != second
