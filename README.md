@@ -944,7 +944,7 @@ Current repository status:
 2J.4   Governed dbt incremental materialization   ✅
 2J.5   Incremental lineage + observability        ✅
 2J.6A  Business-key-aware durable Bronze merge    ✅
-2J.6B  Real two-run PostgreSQL/dbt E2E            ⏳ final validation pending
+2J.6B  Real two-run PostgreSQL/dbt E2E            ✅
 ```
 
 ## 2J.1 — Typed business-key contracts
