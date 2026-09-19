@@ -107,14 +107,6 @@ from utils.dbt_incremental import (
     frozen=True
 )
 class DBTDatasetBuildReport:
-    """
-    Safe deterministic result of one completed
-    application-controlled dbt dataset build.
-
-    This object is internal application state.
-    It is not directly exposed to the LLM.
-    """
-
     content: str
     build_result: DBTBuildResult
 
@@ -125,6 +117,10 @@ class DBTDatasetBuildReport:
     quality_contract_fingerprint: (
         str | None
     )
+
+    materialization: str
+    incremental_eligible: bool
+    incremental_key_column_count: int
 
 
 class ETLTools:
@@ -1279,6 +1275,31 @@ class ETLTools:
                 ),
                 column_count=(
                     result.column_count
+                ),
+                load_mode=(
+                    load_mode
+                ),
+                business_key_configured=(
+                    business_key_contract
+                    is not None
+                ),
+                business_key_column_count=(
+                    len(
+                        business_key_contract.columns
+                    )
+                    if business_key_contract
+                    is not None
+                    else 0
+                ),
+                business_key_fingerprint=(
+                    business_key_contract_fingerprint
+                ),
+                source_dataset_fingerprint=(
+                    source_dataset_fingerprint
+                ),
+                checkpoint_bound=(
+                    source_checkpoint_dataset_fingerprint
+                    is not None
                 ),
             )
         )
@@ -5073,6 +5094,11 @@ class ETLTools:
             else DataLayer.SILVER
         )
 
+        incremental_key_column_count = len(
+            model_metadata
+            .incremental_key_columns
+        )
+
         lineage_event_id = (
             self.lineage_store
             .record_dbt_build(
@@ -5103,6 +5129,16 @@ class ETLTools:
                 artifact=(
                     result.artifact
                 ),
+                materialization=(
+                    model_metadata.materialization
+                ),
+                incremental_eligible=(
+                    model_metadata
+                    .incremental_eligible
+                ),
+                incremental_key_column_count=(
+                    incremental_key_column_count
+                ),
             )
         )
 
@@ -5128,7 +5164,13 @@ class ETLTools:
             f"Quality contract: "
             f"{quality_status}\n"
             f"Lineage event: "
-            f"{lineage_event_id}"
+            f"{lineage_event_id}\n"
+            f"Materialization: "
+            f"{model_metadata.materialization}\n"
+            f"Incremental eligible: "
+            f"{model_metadata.incremental_eligible}\n"
+            f"Incremental key-column count: "
+            f"{incremental_key_column_count}\n"
         )
 
         return DBTDatasetBuildReport(
@@ -5148,5 +5190,15 @@ class ETLTools:
             quality_contract_fingerprint=(
                 quality_sync
                 .contract_fingerprint
+            ),
+            materialization=(
+                model_metadata.materialization
+            ),
+            incremental_eligible=(
+                model_metadata
+                .incremental_eligible
+            ),
+            incremental_key_column_count=(
+                incremental_key_column_count
             ),
         )

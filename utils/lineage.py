@@ -315,6 +315,14 @@ class LineageStore:
         warehouse_table: str,
         row_count: int,
         column_count: int,
+        load_mode: str,
+        business_key_configured: bool,
+        business_key_column_count: int,
+        business_key_fingerprint: (
+            str | None
+        ),
+        source_dataset_fingerprint: str,
+        checkpoint_bound: bool,
     ) -> str:
         """
         Record successful materialization of a durable
@@ -365,6 +373,109 @@ class LineageStore:
                 "must be a positive integer."
             )
 
+        if load_mode not in {
+            "refresh_in_place",
+            "merge_upsert",
+        }:
+            raise DatasetError(
+                "Unsupported warehouse lineage "
+                "load mode."
+            )
+
+        if not isinstance(
+            business_key_configured,
+            bool,
+        ):
+            raise DatasetError(
+                "Warehouse lineage business-key "
+                "configuration flag must be boolean."
+            )
+
+        if (
+            not isinstance(
+                business_key_column_count,
+                int,
+            )
+            or isinstance(
+                business_key_column_count,
+                bool,
+            )
+            or business_key_column_count < 0
+        ):
+            raise DatasetError(
+                "Warehouse lineage business-key "
+                "column count must be a "
+                "non-negative integer."
+            )
+
+        if not isinstance(
+            checkpoint_bound,
+            bool,
+        ):
+            raise DatasetError(
+                "Warehouse lineage checkpoint-bound "
+                "flag must be boolean."
+            )
+
+        if (
+            not isinstance(
+                source_dataset_fingerprint,
+                str,
+            )
+            or not source_dataset_fingerprint
+        ):
+            raise DatasetError(
+                "Warehouse lineage requires a "
+                "source dataset fingerprint."
+            )
+
+        if load_mode == "merge_upsert":
+
+            if not business_key_configured:
+                raise DatasetError(
+                    "merge_upsert lineage requires "
+                    "a configured business key."
+                )
+
+            if business_key_column_count < 1:
+                raise DatasetError(
+                    "merge_upsert lineage requires "
+                    "at least one business-key column."
+                )
+
+            if (
+                not isinstance(
+                    business_key_fingerprint,
+                    str,
+                )
+                or not business_key_fingerprint
+            ):
+                raise DatasetError(
+                    "merge_upsert lineage requires "
+                    "a business-key fingerprint."
+                )
+
+        else:
+
+            if business_key_configured:
+                raise DatasetError(
+                    "refresh_in_place lineage cannot "
+                    "claim a configured business key."
+                )
+
+            if business_key_column_count != 0:
+                raise DatasetError(
+                    "refresh_in_place lineage cannot "
+                    "contain business-key columns."
+                )
+
+            if business_key_fingerprint is not None:
+                raise DatasetError(
+                    "refresh_in_place lineage cannot "
+                    "contain a business-key fingerprint."
+                )
+
+
         return self._append_event(
             operation=(
                 "warehouse_sync"
@@ -393,13 +504,32 @@ class LineageStore:
                 ),
             },
             metadata={
-                "load_mode": "refresh_in_place",
+                "load_mode": (
+                    load_mode
+                ),
                 "row_count": (
                     row_count
                 ),
                 "column_count": (
                     column_count
                 ),
+                "source_dataset_fingerprint": (
+                    source_dataset_fingerprint
+                ),
+                "checkpoint_bound": (
+                    checkpoint_bound
+                ),
+                "business_key": {
+                    "configured": (
+                        business_key_configured
+                    ),
+                    "column_count": (
+                        business_key_column_count
+                    ),
+                    "contract_fingerprint": (
+                        business_key_fingerprint
+                    ),
+                },
             },
         )
     
@@ -621,6 +751,9 @@ class LineageStore:
         quality_contract_fingerprint: (
             str | None
         ),
+        materialization: str,
+        incremental_eligible: bool,
+        incremental_key_column_count: int,
         artifact: DBTBuildArtifactSummary,
     ) -> str:
         """
@@ -684,6 +817,90 @@ class LineageStore:
             raise DatasetError(
                 "dbt lineage relation identity "
                 "does not match the model."
+            )
+
+
+        allowed_materializations = (
+            {
+                "view",
+            }
+            if target_layer
+            == DataLayer.SILVER
+            else {
+                "table",
+                "incremental",
+            }
+        )
+
+        if (
+            materialization
+            not in allowed_materializations
+        ):
+            raise DatasetError(
+                "Invalid dbt lineage materialization."
+            )
+
+        if not isinstance(
+            incremental_eligible,
+            bool,
+        ):
+            raise DatasetError(
+                "dbt lineage incremental eligibility "
+                "must be boolean."
+            )
+
+        if (
+            not isinstance(
+                incremental_key_column_count,
+                int,
+            )
+            or isinstance(
+                incremental_key_column_count,
+                bool,
+            )
+            or incremental_key_column_count < 0
+        ):
+            raise DatasetError(
+                "dbt lineage incremental key-column "
+                "count must be non-negative."
+            )
+
+        if (
+            incremental_eligible
+            and incremental_key_column_count < 1
+        ):
+            raise DatasetError(
+                "Incremental-eligible dbt lineage "
+                "requires at least one key column."
+            )
+
+        if (
+            not incremental_eligible
+            and incremental_key_column_count != 0
+        ):
+            raise DatasetError(
+                "Non-incremental dbt lineage cannot "
+                "contain incremental key columns."
+            )
+
+        if (
+            target_layer == DataLayer.GOLD
+            and materialization == "incremental"
+            and not incremental_eligible
+        ):
+            raise DatasetError(
+                "Incremental Gold materialization "
+                "requires incremental eligibility."
+            )
+
+        if (
+            target_layer == DataLayer.GOLD
+            and materialization == "table"
+            and incremental_eligible
+        ):
+            raise DatasetError(
+                "Incremental-eligible Gold lineage "
+                "must use incremental materialization."
             )
 
         tests = [
@@ -784,5 +1001,16 @@ class LineageStore:
                     ),
                 },
                 "tests": tests,
+                "materialization": (
+                    materialization
+                ),
+                "incremental": {
+                    "eligible": (
+                        incremental_eligible
+                    ),
+                    "key_column_count": (
+                        incremental_key_column_count
+                    ),
+                },
             },
         )

@@ -1267,6 +1267,9 @@ def test_dbt_success_records_safe_observability(
             quality_contract_fingerprint=(
                 None
             ),
+            materialization="view",
+            incremental_eligible=True,
+            incremental_key_column_count=1,
         )
     )
 
@@ -1385,4 +1388,23 @@ def test_dbt_success_records_safe_observability(
     assert (
         "Private transformation request."
         not in str(execution)
+    )
+
+    assert (
+        dbt["materialization"]
+        == "view"
+    )
+
+    assert (
+        dbt[
+            "incremental_eligible"
+        ]
+        is True
+    )
+
+    assert (
+        dbt[
+            "incremental_key_column_count"
+        ]
+        == 1
     )

@@ -521,6 +521,16 @@ def _safe_dbt_success_metadata(
             report
             .quality_contract_fingerprint
         ),
+        "materialization": (
+            report.materialization
+        ),
+        "incremental_eligible": (
+            report.incremental_eligible
+        ),
+        "incremental_key_column_count": (
+            report
+            .incremental_key_column_count
+        ),
     }
 
     return {

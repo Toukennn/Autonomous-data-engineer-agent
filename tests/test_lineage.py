@@ -13,6 +13,7 @@ from utils.dbt_artifacts import (
 )
 
 
+
 def test_payload_fingerprint_is_stable():
     first = payload_fingerprint(
         {
@@ -367,6 +368,26 @@ def test_lineage_records_warehouse_sync(
             ),
             row_count=25,
             column_count=4,
+
+            # Phase 2J.5
+            load_mode=(
+                "refresh_in_place"
+            ),
+            business_key_configured=(
+                False
+            ),
+            business_key_column_count=(
+                0
+            ),
+            business_key_fingerprint=(
+                None
+            ),
+            source_dataset_fingerprint=(
+                "a" * 64
+            ),
+            checkpoint_bound=(
+                False
+            ),
         )
     )
 
@@ -429,18 +450,71 @@ def test_lineage_records_warehouse_sync(
 
     assert (
         event["metadata"][
-            "load_mode"
-        ]
-        == "refresh_in_place"
-    )
-
-    assert (
-        event["metadata"][
             "row_count"
         ]
         == 25
     )
 
+def test_lineage_records_merge_upsert_metadata(
+    tmp_path,
+):
+    store = LineageStore(
+        tmp_path
+        / "data"
+    )
+
+    store.record_warehouse_sync(
+        source_dataset="orders",
+        source_schema_fingerprint=(
+            "schema123"
+        ),
+        warehouse_schema="bronze",
+        warehouse_table="orders",
+        row_count=25,
+        column_count=4,
+        load_mode="merge_upsert",
+        business_key_configured=True,
+        business_key_column_count=1,
+        business_key_fingerprint=(
+            "b" * 64
+        ),
+        source_dataset_fingerprint=(
+            "c" * 64
+        ),
+        checkpoint_bound=True,
+    )
+
+    event = (
+        store.get_events()[0]
+    )
+
+    assert (
+        event["metadata"][
+            "load_mode"
+        ]
+        == "merge_upsert"
+    )
+
+    assert (
+        event["metadata"][
+            "business_key"
+        ]["configured"]
+        is True
+    )
+
+    assert (
+        event["metadata"][
+            "business_key"
+        ]["column_count"]
+        == 1
+    )
+
+    assert (
+        event["metadata"][
+            "checkpoint_bound"
+        ]
+        is True
+    )
 
 
 def test_warehouse_sync_lineage_rejects_non_bronze_schema(
@@ -457,6 +531,7 @@ def test_warehouse_sync_lineage_rejects_non_bronze_schema(
             "Bronze schema"
         ),
     ):
+
         store.record_warehouse_sync(
             source_dataset="orders",
             source_schema_fingerprint=(
@@ -466,6 +541,25 @@ def test_warehouse_sync_lineage_rejects_non_bronze_schema(
             warehouse_table="orders",
             row_count=10,
             column_count=2,
+
+            load_mode=(
+                "refresh_in_place"
+            ),
+            business_key_configured=(
+                False
+            ),
+            business_key_column_count=(
+                0
+            ),
+            business_key_fingerprint=(
+                None
+            ),
+            source_dataset_fingerprint=(
+                "a" * 64
+            ),
+            checkpoint_bound=(
+                False
+            ),
         )
 
     assert (
@@ -565,6 +659,9 @@ def test_lineage_records_dbt_build(
                 "b" * 64
             ),
             artifact=artifact,
+            materialization="view",
+            incremental_eligible=True,
+            incremental_key_column_count=1,
         )
     )
 
@@ -611,4 +708,25 @@ def test_lineage_records_dbt_build(
             "tests"
         ][0]["status"]
         == "pass"
+    )
+
+    assert (
+        event["metadata"][
+            "materialization"
+        ]
+        == "view"
+    )
+
+    assert (
+        event["metadata"][
+            "incremental"
+        ]["eligible"]
+        is True
+    )
+
+    assert (
+        event["metadata"][
+            "incremental"
+        ]["key_column_count"]
+        == 1
     )
