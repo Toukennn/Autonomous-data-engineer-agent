@@ -1,8 +1,14 @@
+import pytest
+
+from pydantic import (
+    ValidationError,
+)
+
 from config.settings import (
+    PROJECT_ROOT,
     DatabaseSettings,
     RuntimeSettings,
 )
-
 
 def test_runtime_default_values():
     settings = RuntimeSettings(
@@ -123,3 +129,60 @@ def test_psycopg_config_mapping(
         "dbname": "analytics",
         "port": 5433,
     }
+
+
+def test_runtime_default_data_root():
+    settings = RuntimeSettings(
+        _env_file=None
+    )
+
+    assert (
+        settings.data_root
+        == (
+            PROJECT_ROOT
+            / "data"
+        ).resolve()
+    )
+
+
+def test_runtime_data_root_from_environment(
+    monkeypatch,
+    tmp_path,
+):
+    data_root = (
+        tmp_path
+        / "persistent-data"
+    ).resolve()
+
+    monkeypatch.setenv(
+        "DATA_ROOT",
+        str(
+            data_root
+        ),
+    )
+
+    settings = RuntimeSettings(
+        _env_file=None
+    )
+
+    assert (
+        settings.data_root
+        == data_root
+    )
+
+
+def test_runtime_rejects_relative_data_root(
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "DATA_ROOT",
+        "relative/data",
+    )
+
+    with pytest.raises(
+        ValidationError,
+        match="DATA_ROOT",
+    ):
+        RuntimeSettings(
+            _env_file=None
+        )

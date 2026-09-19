@@ -1447,6 +1447,10 @@ Autonomous-data-engineer-agent/
 │   ├── etl_analyst.py
 │   └── sql_analyst.py
 │
+├── app/
+│   ├── __init__.py
+│   └── api.py
+│
 ├── config/
 │   └── settings.py
 │
@@ -1522,7 +1526,6 @@ Autonomous-data-engineer-agent/
 ├── sql_analyst_graph.png
 ├── inspect_warehouse.py
 ├── phase_2i_e2e.py
-├── main.py
 ├── pyproject.toml
 └── uv.lock
 ```
@@ -1600,7 +1603,7 @@ See `.env.example` for the full configuration.
 Run the top-level router:
 
 ```bash
-uv run python main.py
+uv run uvicorn app.api:app --host 127.0.0.1 --port 8000 --workers 1
 ```
 
 Run individual agents:

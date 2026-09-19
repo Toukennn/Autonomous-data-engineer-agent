@@ -1,7 +1,13 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import AliasChoices, Field, SecretStr
+from pydantic import (
+    AliasChoices,
+    Field,
+    SecretStr,
+    field_validator,
+)
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -105,15 +111,56 @@ class RuntimeSettings(_BaseAppSettings):
         ge=1_000,
     )
 
-    @property
-    def project_root(self) -> Path:
-        return PROJECT_ROOT
+    data_root_path: Path = Field(
+        default=(
+            PROJECT_ROOT
+            / "data"
+        ),
+        validation_alias=(
+            "DATA_ROOT"
+        ),
+    )
+
+
+    @field_validator(
+        "data_root_path"
+    )
+    @classmethod
+    def validate_data_root_path(
+        cls,
+        value: Path,
+    ) -> Path:
+
+        path = (
+            Path(
+                value
+            )
+            .expanduser()
+        )
+
+        if not path.is_absolute():
+            raise ValueError(
+                "DATA_ROOT must be an "
+                "absolute path."
+            )
+
+        return path.resolve()
+
 
     @property
-    def data_root(self) -> Path:
+    def project_root(
+        self,
+    ) -> Path:
+        return PROJECT_ROOT
+
+
+    @property
+    def data_root(
+        self,
+    ) -> Path:
         return (
-            PROJECT_ROOT / "data"
-        ).resolve()
+            self.data_root_path
+        )
 
     api_max_total_response_bytes: int = Field(
         default=100_000_000,

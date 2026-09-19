@@ -9,6 +9,7 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "dbt-postgres>=1.11.0",
+    "fastapi>=0.141.1",
     "langchain>=1.4.0",
     "langchain-anthropic>=1.7.2",
     "langchain-openai>=1.6.0",
@@ -20,10 +21,12 @@ dependencies = [
     "pydantic-settings>=2.15.0",
     "requests>=2.32.0",
     "sqlglot>=30.18.0",
+    "uvicorn>=0.53.0",
 ]
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28.1",
     "ipython>=9.17.1",
     "pytest>=9.1.1",
     "ruff>=0.16.7",
@@ -38,6 +41,7 @@ build-backend = "setuptools.build_meta"
 where = ["."]
 include = [
     "agents*",
+    "app*",
     "config*",
     "models*",
     "utils*",
