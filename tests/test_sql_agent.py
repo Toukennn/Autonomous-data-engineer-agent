@@ -199,6 +199,9 @@ def test_sql_safety_uses_catalog_snapshot_from_state(
         return SimpleNamespace(
             is_safe=True,
             reason="safe",
+            referenced_relations=(
+                "dbt_test_gold.mart_sales",
+            ),
         )
 
     monkeypatch.setattr(

@@ -374,3 +374,68 @@ def test_analytics_schema_rejects_invalid_name():
             .analytics_schema_names(
                 "dbt-test;DROP"
             )
+
+
+def test_execute_read_only_result_returns_structured_result(
+    monkeypatch,
+):
+    connection = MagicMock()
+    cursor = MagicMock()
+
+    connection.cursor\
+        .return_value\
+        .__enter__\
+        .return_value = cursor
+
+    cursor.description = [
+        SimpleNamespace(
+            name="name"
+        )
+    ]
+
+    cursor.fetchmany.return_value = [
+        ("bulbasaur",),
+        ("ivysaur",),
+    ]
+
+    monkeypatch.setattr(
+        "utils.database.psycopg2.connect",
+        lambda **kwargs: connection,
+    )
+
+    database = DatabaseUtil(
+        {
+            "host": "localhost",
+            "user": "test",
+            "password": "test",
+            "dbname": "test",
+            "port": 5432,
+        }
+    )
+
+    result = (
+        database
+        .execute_read_only_result(
+            (
+                "SELECT name "
+                "FROM "
+                "dbt_test_gold.mart_pokemon"
+            ),
+            max_rows=10,
+        )
+    )
+
+    assert (
+        result.columns
+        == ("name",)
+    )
+
+    assert (
+        result.row_count
+        == 2
+    )
+
+    assert (
+        result.truncated
+        is False
+    )

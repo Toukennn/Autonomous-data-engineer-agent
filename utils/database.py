@@ -2,6 +2,7 @@ import psycopg2
 import json 
 import re
 from psycopg2 import sql
+from dataclasses import dataclass
 
 from config.settings import (
     get_database_settings,
@@ -13,6 +14,37 @@ from utils.exceptions import (
     DatabaseQueryError,
 )
 
+@dataclass(
+    frozen=True
+)
+class ReadOnlyQueryResult:
+    """
+    Structured result from deterministic
+    read-only PostgreSQL execution.
+    """
+
+    columns: tuple[str, ...]
+    rows: tuple[tuple, ...]
+    row_count: int
+    truncated: bool
+
+    def as_dict(
+        self,
+    ) -> dict:
+        return {
+            "columns": list(
+                self.columns
+            ),
+            "rows": list(
+                self.rows
+            ),
+            "row_count": (
+                self.row_count
+            ),
+            "truncated": (
+                self.truncated
+            ),
+        }
 
 # ============================================================
 # DATABASE UTIL
@@ -615,6 +647,122 @@ class DatabaseUtil:
             indent=2,
             ensure_ascii=False,
         )
+
+    def execute_read_only_result(
+        self,
+        query: str,
+        statement_timeout_ms: int | None = None,
+        max_rows: int | None = None,
+    ) -> ReadOnlyQueryResult:
+
+        runtime = (
+            get_runtime_settings()
+        )
+
+        statement_timeout_ms = (
+            statement_timeout_ms
+            if statement_timeout_ms
+            is not None
+            else (
+                runtime
+                .sql_statement_timeout_ms
+            )
+        )
+
+        max_rows = (
+            max_rows
+            if max_rows is not None
+            else runtime.sql_max_rows
+        )
+
+        connection = (
+            self._connect()
+        )
+
+        try:
+            connection.set_session(
+                readonly=True,
+                autocommit=False,
+            )
+
+            with connection.cursor() as cursor:
+
+                cursor.execute(
+                    """
+                    SELECT set_config(
+                        'statement_timeout',
+                        %s,
+                        true
+                    );
+                    """,
+                    (
+                        f"{statement_timeout_ms}ms",
+                    ),
+                )
+
+                cursor.execute(
+                    query
+                )
+
+                if (
+                    cursor.description
+                    is None
+                ):
+                    raise RuntimeError(
+                        "Read-only SQL query did "
+                        "not produce a result set."
+                    )
+
+                rows = cursor.fetchmany(
+                    max_rows + 1
+                )
+
+                truncated = (
+                    len(rows)
+                    > max_rows
+                )
+
+                rows = (
+                    rows[
+                        :max_rows
+                    ]
+                )
+
+                columns = tuple(
+                    description.name
+                    for description
+                    in cursor.description
+                )
+
+                result = (
+                    ReadOnlyQueryResult(
+                        columns=columns,
+                        rows=tuple(
+                            rows
+                        ),
+                        row_count=len(
+                            rows
+                        ),
+                        truncated=(
+                            truncated
+                        ),
+                    )
+                )
+
+                connection.rollback()
+
+                return result
+
+        except psycopg2.Error as exc:
+
+            connection.rollback()
+
+            raise DatabaseQueryError(
+                "SQL execution failed."
+            ) from exc
+
+        finally:
+            connection.close()
 
 
 # ============================================================

@@ -36,6 +36,16 @@ class AgentSchema(BaseModel):
     sql_query_execution_result: str = ""
     final_answer: str = ""
 
+    run_id: str = ""
+
+    referenced_relations: list[
+        str
+    ] = Field(
+        default_factory=list
+    )
+
+    sql_execution_failed: bool = False
+
 
 class JudgeSchema(BaseModel):
     answer: Literal["YES", "NO"]

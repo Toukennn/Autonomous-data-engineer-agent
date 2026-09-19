@@ -14,13 +14,17 @@ from sqlglot.optimizer.scope import (
 )
 class SQLValidationResult:
     """
-    Result returned by the deterministic
-    SQL safety validator.
+    Result returned by deterministic
+    SQL safety validation.
     """
 
     is_safe: bool
     reason: str
 
+    referenced_relations: tuple[
+        str,
+        ...
+    ] = ()
 
 class SQLSafetyValidator:
     """
@@ -350,14 +354,13 @@ class SQLSafetyValidator:
         statement: exp.Query,
         *,
         analytics_catalog: dict,
-    ) -> SQLValidationResult | None:
+    ) -> SQLValidationResult:
         """
         Validate physical PostgreSQL relations
         against the governed analytics catalog.
 
-        SQLGlot scopes are used so CTEs and
-        subqueries cannot be confused with
-        physical database relations.
+        SQLGlot scopes distinguish physical
+        relations from CTEs and subqueries.
         """
 
         try:
@@ -383,10 +386,8 @@ class SQLSafetyValidator:
         # ========================================================
 
         try:
-            root_scope = (
-                build_scope(
-                    statement
-                )
+            root_scope = build_scope(
+                statement
             )
 
         except Exception:
@@ -409,32 +410,18 @@ class SQLSafetyValidator:
                 ),
             )
 
-        governed_relation_count = 0
+        referenced_relations: set[
+            str
+        ] = set()
 
         # ========================================================
-        # PHYSICAL SOURCES
-        # ========================================================
-        #
-        # Scope.selected_sources resolves the semantic
-        # meaning of FROM / JOIN sources.
-        #
-        # Physical relation:
-        #     exp.Table
-        #
-        # CTE / subquery:
-        #     Scope
-        #
-        # This avoids treating every exp.Table node
-        # as a real PostgreSQL relation.
+        # VALIDATE PHYSICAL SOURCES
         # ========================================================
 
         try:
-
-            scopes = (
+            for scope in (
                 root_scope.traverse()
-            )
-
-            for scope in scopes:
+            ):
 
                 for (
                     _alias,
@@ -448,19 +435,13 @@ class SQLSafetyValidator:
                     .items()
                 ):
 
-                    # --------------------------------------------
-                    # CTE / SUBQUERY
-                    # --------------------------------------------
-
+                    # CTEs / subqueries are represented
+                    # as nested Scope objects.
                     if isinstance(
                         source,
                         Scope,
                     ):
                         continue
-
-                    # --------------------------------------------
-                    # UNKNOWN SOURCE TYPE
-                    # --------------------------------------------
 
                     if not isinstance(
                         source,
@@ -487,10 +468,6 @@ class SQLSafetyValidator:
                         source.catalog
                     )
 
-                    # --------------------------------------------
-                    # INVALID RELATION
-                    # --------------------------------------------
-
                     if not relation_name:
 
                         return SQLValidationResult(
@@ -503,7 +480,7 @@ class SQLSafetyValidator:
                         )
 
                     # --------------------------------------------
-                    # CROSS-DATABASE REFERENCE
+                    # CROSS-DATABASE ACCESS
                     # --------------------------------------------
 
                     if catalog_name:
@@ -577,7 +554,10 @@ class SQLSafetyValidator:
                             ),
                         )
 
-                    governed_relation_count += 1
+                    referenced_relations.add(
+                        f"{schema_name}."
+                        f"{relation_name}"
+                    )
 
         except Exception:
 
@@ -590,10 +570,10 @@ class SQLSafetyValidator:
             )
 
         # ========================================================
-        # REQUIRE WAREHOUSE ACCESS
+        # REQUIRE GOVERNED WAREHOUSE ACCESS
         # ========================================================
 
-        if governed_relation_count == 0:
+        if not referenced_relations:
 
             return SQLValidationResult(
                 is_safe=False,
@@ -605,7 +585,22 @@ class SQLSafetyValidator:
                 ),
             )
 
-        return None
+        return SQLValidationResult(
+            is_safe=True,
+            reason=(
+                "Query is a single parsed "
+                "read-only PostgreSQL statement "
+                "and references only governed "
+                "analytics relations."
+            ),
+            referenced_relations=(
+                tuple(
+                    sorted(
+                        referenced_relations
+                    )
+                )
+            ),
+        )
 
     # ========================================================
     # MAIN VALIDATOR
@@ -621,14 +616,18 @@ class SQLSafetyValidator:
         """
         Validate one PostgreSQL query.
 
-        When analytics_catalog is omitted, this preserves
-        the existing generic read-only SQL validation.
+        Without analytics_catalog:
+            generic read-only SQL validation.
 
-        When analytics_catalog is provided, governed
-        relation validation is additionally enforced.
+        With analytics_catalog:
+            generic validation plus deterministic
+            governed relation validation.
         """
 
-        if not sql or not sql.strip():
+        if (
+            not sql
+            or not sql.strip()
+        ):
 
             return SQLValidationResult(
                 is_safe=False,
@@ -636,6 +635,10 @@ class SQLSafetyValidator:
                     "SQL query is empty."
                 ),
             )
+
+        # ========================================================
+        # PARSE
+        # ========================================================
 
         try:
             statements = (
@@ -656,11 +659,13 @@ class SQLSafetyValidator:
                 ),
             )
 
-        # ----------------------------------------------------
+        # ========================================================
         # EXACTLY ONE STATEMENT
-        # ----------------------------------------------------
+        # ========================================================
 
-        if len(statements) != 1:
+        if len(
+            statements
+        ) != 1:
 
             return SQLValidationResult(
                 is_safe=False,
@@ -674,9 +679,9 @@ class SQLSafetyValidator:
             statements[0]
         )
 
-        # ----------------------------------------------------
+        # ========================================================
         # QUERY EXPRESSIONS ONLY
-        # ----------------------------------------------------
+        # ========================================================
 
         if not isinstance(
             statement,
@@ -691,11 +696,13 @@ class SQLSafetyValidator:
                 ),
             )
 
-        # ----------------------------------------------------
+        # ========================================================
         # FULL AST WRITE CHECK
-        # ----------------------------------------------------
+        # ========================================================
 
-        for node in statement.walk():
+        for node in (
+            statement.walk()
+        ):
 
             if isinstance(
                 node,
@@ -711,16 +718,16 @@ class SQLSafetyValidator:
                     ),
                 )
 
-        # ----------------------------------------------------
+        # ========================================================
         # GOVERNED ANALYTICS
-        # ----------------------------------------------------
+        # ========================================================
 
         if (
             analytics_catalog
             is not None
         ):
 
-            relation_result = (
+            return (
                 cls
                 ._validate_governed_relations(
                     statement,
@@ -730,21 +737,9 @@ class SQLSafetyValidator:
                 )
             )
 
-            if (
-                relation_result
-                is not None
-            ):
-                return relation_result
-
-            return SQLValidationResult(
-                is_safe=True,
-                reason=(
-                    "Query is a single parsed "
-                    "read-only PostgreSQL statement "
-                    "and references only governed "
-                    "analytics relations."
-                ),
-            )
+        # ========================================================
+        # GENERIC READ-ONLY SUCCESS
+        # ========================================================
 
         return SQLValidationResult(
             is_safe=True,
@@ -752,4 +747,5 @@ class SQLSafetyValidator:
                 "Query is a single parsed "
                 "read-only PostgreSQL statement."
             ),
+            referenced_relations=(),
         )

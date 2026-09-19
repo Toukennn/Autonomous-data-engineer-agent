@@ -30,6 +30,11 @@ class ExecutionRunStore:
         "failed",
     }
 
+    _ALLOWED_AGENTS = {
+        "etl_analyst",
+        "sql_analyst",
+    }    
+
     def __init__(
         self,
         data_root: Path,
@@ -153,7 +158,7 @@ class ExecutionRunStore:
                 pass
 
             raise DatasetError(
-                "Failed to persist ETL execution run."
+                "Failed to persist execution run."
             ) from exc
 
     def _load_run(
@@ -225,11 +230,40 @@ class ExecutionRunStore:
         self,
         *,
         run_id: str,
-        max_tool_calls: int,
+        max_tool_calls: int | None = None,
+        agent: str = "etl_analyst",
     ) -> None:
         """
-        Create a new running ETL execution record.
+        Create a new structured execution record.
         """
+
+        if (
+            agent
+            not in self._ALLOWED_AGENTS
+        ):
+            raise DatasetError(
+                "Unsupported execution-run agent."
+            )
+
+        if (
+            max_tool_calls
+            is not None
+            and (
+                isinstance(
+                    max_tool_calls,
+                    bool,
+                )
+                or not isinstance(
+                    max_tool_calls,
+                    int,
+                )
+                or max_tool_calls < 1
+            )
+        ):
+            raise DatasetError(
+                "Execution-run tool limit must "
+                "be a positive integer or None."
+            )
 
         run_file = (
             self._resolve_run_file(
@@ -248,7 +282,7 @@ class ExecutionRunStore:
                 self.RUN_VERSION
             ),
             "run_id": run_id,
-            "agent": "etl_analyst",
+            "agent": agent,
             "status": "running",
             "started_at": (
                 self._utc_now()

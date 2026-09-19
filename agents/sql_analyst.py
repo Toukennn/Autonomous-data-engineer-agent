@@ -10,6 +10,39 @@ from config.settings import (
     get_runtime_settings,
 )
 
+import logging
+
+from datetime import (
+    datetime,
+    timezone,
+)
+
+from time import (
+    perf_counter,
+)
+
+from uuid import (
+    uuid4,
+)
+
+from utils.execution_observability import (
+    ExecutionRunStore,
+)
+
+runtime_settings = (
+    get_runtime_settings()
+)
+
+execution_store = (
+    ExecutionRunStore(
+        runtime_settings.data_root
+    )
+)
+
+logger = logging.getLogger(
+    __name__
+)
+
 # ============================================================
 # HELPERS
 # ============================================================
@@ -55,6 +88,72 @@ def get_database() -> DatabaseUtil:
 
     return DatabaseUtil(config)
 
+def _record_event_safely(
+    **kwargs,
+) -> None:
+    """
+    Observability must never make an otherwise
+    valid SQL workflow fail.
+    """
+
+    try:
+        execution_store.record_event(
+            **kwargs
+        )
+
+    except Exception as exc:
+        logger.warning(
+            "Failed to record SQL "
+            "execution event: %s",
+            exc,
+        )
+
+
+def _complete_run_safely(
+    **kwargs,
+) -> None:
+    try:
+        execution_store.complete_run(
+            **kwargs
+        )
+
+    except Exception as exc:
+        logger.warning(
+            "Failed to complete SQL "
+            "execution run: %s",
+            exc,
+        )
+
+def initialize_run_node(
+    state: AgentSchema,
+):
+    """
+    Initialize one SQL-agent execution run.
+    """
+
+    if state.run_id:
+        return {}
+
+    run_id = str(
+        uuid4()
+    )
+
+    try:
+        execution_store.start_run(
+            run_id=run_id,
+            agent="sql_analyst",
+        )
+
+    except Exception as exc:
+        logger.warning(
+            "Failed to initialize SQL "
+            "execution observability: %s",
+            exc,
+        )
+
+    return {
+        "run_id": run_id
+    }
 
 # ============================================================
 # NODE 1 — CURATE USER QUESTION
@@ -234,13 +333,15 @@ def generate_sql(state: AgentSchema):
 def check_sql_safety(
     state: AgentSchema,
 ):
-    """
-    Deterministically validate generated SQL
-    against the exact governed analytics catalog
-    snapshot that was supplied to the LLM.
+    started_at = (
+        datetime.now(
+            timezone.utc
+        ).isoformat()
+    )
 
-    No new catalog/database lookup occurs here.
-    """
+    started_clock = (
+        perf_counter()
+    )
 
     validation = (
         SQLSafetyValidator.validate(
@@ -249,6 +350,55 @@ def check_sql_safety(
                 state.analytics_catalog
             ),
         )
+    )
+
+    completed_at = (
+        datetime.now(
+            timezone.utc
+        ).isoformat()
+    )
+
+    duration_ms = (
+        (
+            perf_counter()
+            - started_clock
+        )
+        * 1000
+    )
+
+    referenced_relations = list(
+        validation
+        .referenced_relations
+    )
+
+    _record_event_safely(
+        run_id=state.run_id,
+        event_type=(
+            "sql_safety"
+        ),
+        name=(
+            "governed_sql_validation"
+        ),
+        status=(
+            "success"
+            if validation.is_safe
+            else "rejected"
+        ),
+        started_at=started_at,
+        completed_at=(
+            completed_at
+        ),
+        duration_ms=(
+            duration_ms
+        ),
+        metadata={
+            "relation_count": len(
+                referenced_relations
+            ),
+            "referenced_relations": (
+                referenced_relations
+            ),
+        },
     )
 
     return {
@@ -260,8 +410,10 @@ def check_sql_safety(
         "comments": (
             validation.reason
         ),
+        "referenced_relations": (
+            referenced_relations
+        ),
     }
-
 
 # ============================================================
 # NODE 5A — CANCEL UNSAFE SQL
@@ -278,6 +430,11 @@ def cancel_sql(state: AgentSchema):
         f"Reason: {state.comments}"
     )
 
+    _complete_run_safely(
+        run_id=state.run_id,
+        status="completed",
+    )
+
     return {
         "final_answer": final_answer,
         "messages": [
@@ -287,40 +444,179 @@ def cancel_sql(state: AgentSchema):
         ],
     }
 
+def complete_run_node(
+    state: AgentSchema,
+):
+    """
+    Finalize a governed SQL execution run.
+    """
+
+    if (
+        state.sql_execution_failed
+    ):
+        _complete_run_safely(
+            run_id=state.run_id,
+            status="failed",
+            failure_reason=(
+                "SQL execution failed."
+            ),
+        )
+
+    else:
+        _complete_run_safely(
+            run_id=state.run_id,
+            status="completed",
+        )
+
+    return {}
+
 
 # ============================================================
 # NODE 5B — EXECUTE SAFE SQL
 # ============================================================
 
-def execute_sql(state: AgentSchema):
+def execute_sql(
+    state: AgentSchema,
+):
     """
-    Execute SQL that passed the current safety check.
+    Execute validated governed SQL and record
+    safe aggregate runtime metadata.
     """
 
-    database = get_database()
+    database = (
+        get_database()
+    )
+
+    started_at = (
+        datetime.now(
+            timezone.utc
+        ).isoformat()
+    )
+
+    started_clock = (
+        perf_counter()
+    )
 
     try:
-        result = database.execute_read_only(
-            state.generated_sql_query
-        )
-
-        if result is None:
-            result = (
-                "The SQL query could not be executed "
-                "successfully."
+        result = (
+            database
+            .execute_read_only_result(
+                state.generated_sql_query
             )
+        )
 
     except Exception as exc:
 
-        result = (
-            f"SQL execution failed: "
-            f"{type(exc).__name__}: {exc}"
+        completed_at = (
+            datetime.now(
+                timezone.utc
+            ).isoformat()
         )
 
-    return {
-        "sql_query_execution_result": str(result)
-    }
+        duration_ms = (
+            (
+                perf_counter()
+                - started_clock
+            )
+            * 1000
+        )
 
+        _record_event_safely(
+            run_id=state.run_id,
+            event_type=(
+                "sql_execution"
+            ),
+            name=(
+                "read_only_query"
+            ),
+            status="failed",
+            started_at=started_at,
+            completed_at=(
+                completed_at
+            ),
+            duration_ms=(
+                duration_ms
+            ),
+            metadata={
+                "referenced_relations": (
+                    state
+                    .referenced_relations
+                ),
+                "relation_count": len(
+                    state
+                    .referenced_relations
+                ),
+                "error_type": (
+                    type(
+                        exc
+                    ).__name__
+                ),
+            },
+        )
+
+        return {
+            "sql_query_execution_result": (
+                "SQL execution failed: "
+                f"{type(exc).__name__}."
+            ),
+            "sql_execution_failed": True,
+        }
+
+    completed_at = (
+        datetime.now(
+            timezone.utc
+        ).isoformat()
+    )
+
+    duration_ms = (
+        (
+            perf_counter()
+            - started_clock
+        )
+        * 1000
+    )
+
+    _record_event_safely(
+        run_id=state.run_id,
+        event_type=(
+            "sql_execution"
+        ),
+        name="read_only_query",
+        status="success",
+        started_at=started_at,
+        completed_at=(
+            completed_at
+        ),
+        duration_ms=(
+            duration_ms
+        ),
+        metadata={
+            "referenced_relations": (
+                state
+                .referenced_relations
+            ),
+            "relation_count": len(
+                state
+                .referenced_relations
+            ),
+            "row_count": (
+                result.row_count
+            ),
+            "column_count": len(
+                result.columns
+            ),
+            "truncated": (
+                result.truncated
+            ),
+        },
+    )
+
+    return {
+        "sql_query_execution_result": str(
+            result.as_dict()
+        ),
+        "sql_execution_failed": False,
+    }
 
 # ============================================================
 # NODE 6 — CREATE USER-FRIENDLY ANSWER
@@ -412,6 +708,11 @@ sql_graph = StateGraph(
 # -----------------------------
 
 sql_graph.add_node(
+    "initialize",
+    initialize_run_node,
+)
+
+sql_graph.add_node(
     "curate_question",
     curate_question,
 )
@@ -446,6 +747,10 @@ sql_graph.add_node(
     represent_final_answer,
 )
 
+sql_graph.add_node(
+    "complete",
+    complete_run_node,
+)
 
 # -----------------------------
 # Main workflow
@@ -453,6 +758,11 @@ sql_graph.add_node(
 
 sql_graph.add_edge(
     START,
+    "initialize",
+)
+
+sql_graph.add_edge(
+    "initialize",
     "curate_question",
 )
 
@@ -497,6 +807,11 @@ sql_graph.add_edge(
 
 sql_graph.add_edge(
     "represent_final_answer",
+    "complete",
+)
+
+sql_graph.add_edge(
+    "complete",
     END,
 )
 

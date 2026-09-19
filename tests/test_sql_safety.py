@@ -531,3 +531,63 @@ def test_nested_cte_name_cannot_hide_outer_physical_table():
         "schema-qualified"
         in result.reason
     )
+
+
+def test_nested_cte_with_governed_relations_is_allowed():
+    query = """
+    SELECT *
+    FROM dbt_test_gold.mart_sales AS sales
+    WHERE EXISTS (
+        WITH orders AS (
+            SELECT *
+            FROM dbt_test_silver.stg_orders
+        )
+        SELECT 1
+        FROM orders
+        WHERE orders.order_id
+              = sales.customer_id
+    )
+    """
+
+    result = (
+        SQLSafetyValidator
+        .validate(
+            query,
+            analytics_catalog=(
+                _analytics_catalog()
+            ),
+        )
+    )
+
+    assert (
+        result.is_safe
+        is True
+    )
+
+
+def test_governed_validation_reports_relations():
+    result = (
+        SQLSafetyValidator
+        .validate(
+            """
+            SELECT *
+            FROM dbt_test_gold.mart_sales
+            JOIN dbt_test_silver.stg_orders
+              ON stg_orders.order_id
+                 = mart_sales.customer_id
+            """,
+            analytics_catalog=(
+                _analytics_catalog()
+            ),
+        )
+    )
+
+    assert result.is_safe is True
+
+    assert (
+        result.referenced_relations
+        == (
+            "dbt_test_gold.mart_sales",
+            "dbt_test_silver.stg_orders",
+        )
+    )
