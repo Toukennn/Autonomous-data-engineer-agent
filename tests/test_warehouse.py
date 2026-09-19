@@ -578,3 +578,111 @@ def test_existing_bronze_table_rejects_type_change(
 
     connection.rollback\
         .assert_called_once()
+
+
+def test_merge_bronze_table_never_truncates(
+    monkeypatch,
+):
+    connection = MagicMock()
+    cursor = MagicMock()
+
+    connection.cursor\
+        .return_value\
+        .__enter__\
+        .return_value = cursor
+
+    monkeypatch.setattr(
+        "utils.warehouse.psycopg2.connect",
+        lambda **kwargs: connection,
+    )
+
+    loader = _loader()
+
+    monkeypatch.setattr(
+        loader,
+        "_get_existing_columns",
+        lambda **kwargs: {
+            "id": "BIGINT",
+            "name": "TEXT",
+        },
+    )
+
+    monkeypatch.setattr(
+        loader,
+        "_validate_existing_business_keys",
+        lambda **kwargs: None,
+    )
+
+    monkeypatch.setattr(
+        loader,
+        "_ensure_business_key_index",
+        lambda **kwargs: None,
+    )
+
+    captured = {}
+
+    def fake_execute_values(
+        cursor_arg,
+        query,
+        rows,
+        page_size,
+    ):
+        captured["query"] = repr(
+            query
+        ).upper()
+
+    monkeypatch.setattr(
+        "utils.warehouse.execute_values",
+        fake_execute_values,
+    )
+
+    dataframe = pd.DataFrame(
+        {
+            "id": [
+                1,
+                2,
+            ],
+            "name": [
+                "alice",
+                "bob",
+            ],
+        }
+    )
+
+    loader.merge_bronze_table(
+        dataset_name="customers",
+        dataframe=dataframe,
+        business_key=(
+            BusinessKeyContract(
+                columns=[
+                    "id"
+                ]
+            )
+        ),
+    )
+
+    assert (
+        "ON CONFLICT"
+        in captured["query"]
+    )
+
+    all_queries = " ".join(
+        repr(
+            call.args[0]
+        ).upper()
+        for call
+        in cursor.execute.call_args_list
+    )
+
+    assert (
+        "TRUNCATE"
+        not in all_queries
+    )
+
+    assert (
+        "DROP TABLE"
+        not in all_queries
+    )
+
+    connection.commit\
+        .assert_called_once()

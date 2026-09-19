@@ -92,6 +92,11 @@ from utils.dbt_model_metadata import (
     DBTModelMetadataStore,
 )
 
+from utils.business_keys import (
+    BusinessKeyContractStore,
+    business_key_fingerprint,
+    validate_business_key,
+)
 
 @dataclass(
     frozen=True
@@ -225,6 +230,12 @@ class ETLTools:
                     self.project_root
                     / "dbt"
                 )
+            )
+        )
+
+        self.business_key_contract_store = (
+            BusinessKeyContractStore(
+                self.data_root
             )
         )
 
@@ -770,15 +781,64 @@ class ETLTools:
             self._get_warehouse_loader()
         )
 
-        result = (
-            warehouse_loader
-            .replace_bronze_table(
+        business_key_contract = (
+            self.business_key_contract_store
+            .load(
                 dataset_name=(
                     safe_dataset_name
-                ),
-                dataframe=dataframe,
+                )
             )
         )
+
+        business_key_contract_fingerprint = None
+
+        if business_key_contract is not None:
+
+            validate_business_key(
+                dataframe=dataframe,
+                contract=(
+                    business_key_contract
+                ),
+            )
+
+            business_key_contract_fingerprint = (
+                business_key_fingerprint(
+                    business_key_contract
+                )
+            )
+
+            result = (
+                warehouse_loader
+                .merge_bronze_table(
+                    dataset_name=(
+                        safe_dataset_name
+                    ),
+                    dataframe=dataframe,
+                    business_key=(
+                        business_key_contract
+                    ),
+                )
+            )
+
+            load_mode = (
+                "merge_upsert"
+            )
+
+        else:
+
+            result = (
+                warehouse_loader
+                .replace_bronze_table(
+                    dataset_name=(
+                        safe_dataset_name
+                    ),
+                    dataframe=dataframe,
+                )
+            )
+
+            load_mode = (
+                "refresh_in_place"
+            )
 
         # ============================================================
         # WAREHOUSE SYNC METADATA
@@ -846,7 +906,22 @@ class ETLTools:
             "warehouse_table": (
                 result.table
             ),
-            "load_mode": "refresh_in_place",
+            "load_mode": load_mode,
+            "business_key_configured": (
+                business_key_contract
+                is not None
+            ),
+            "business_key_columns": (
+                list(
+                    business_key_contract.columns
+                )
+                if business_key_contract
+                is not None
+                else []
+            ),
+            "business_key_fingerprint": (
+                business_key_contract_fingerprint
+            ),
             "rows_loaded": (
                 result.row_count
             ),
@@ -908,7 +983,7 @@ class ETLTools:
         # RESULT
         # ============================================================
 
-        return (
+        summary = (
             "Bronze dataset loaded into "
             "PostgreSQL successfully.\n"
             f"Dataset: {safe_dataset_name}\n"
@@ -921,6 +996,7 @@ class ETLTools:
             f"Warehouse relation: "
             f"{result.schema}."
             f"{result.table}\n"
+            f"Load mode: {load_mode}\n"
             f"Rows loaded: "
             f"{result.row_count}\n"
             f"Columns loaded: "
@@ -932,6 +1008,19 @@ class ETLTools:
             f"Lineage event: "
             f"{lineage_event_id}"
         )
+
+        if (
+            business_key_contract
+            is not None
+        ):
+            summary += (
+                "\nBusiness key: "
+                f"{business_key_contract.columns}"
+                "\nBusiness-key fingerprint: "
+                f"{business_key_contract_fingerprint}"
+            )
+
+        return summary
 
     def _resolve_layer_dataset_file(
         self,

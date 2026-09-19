@@ -9,7 +9,19 @@ from psycopg2.extras import execute_values
 from utils.data_layers import (
     validate_dataset_name,
 )
+
+import hashlib
+
+from models.warehouse_keys import (
+    BusinessKeyContract,
+)
+
+from utils.business_keys import (
+    validate_business_key,
+)
+
 from utils.exceptions import (
+    BusinessKeyError,
     DatabaseConnectionError,
     DatasetError,
     WarehouseLoadError,
@@ -827,6 +839,537 @@ class PostgresWarehouseLoader:
             ) from exc
 
         finally:
+            connection.close()
+
+        return WarehouseLoadResult(
+            schema=(
+                self.BRONZE_SCHEMA
+            ),
+            table=(
+                safe_dataset_name
+            ),
+            row_count=len(
+                dataframe
+            ),
+            column_count=len(
+                columns
+            ),
+            columns=tuple(
+                columns
+            ),
+        )
+
+
+    @staticmethod
+    def _business_key_index_name(
+        *,
+        dataset_name: str,
+        key_columns: tuple[str, ...],
+    ) -> str:
+        """
+        Generate an application-controlled,
+        PostgreSQL-safe unique-index name.
+
+        Raw dataset/column names are not embedded
+        into the physical index name.
+        """
+
+        canonical = json.dumps(
+            {
+                "dataset": dataset_name,
+                "key_columns": list(
+                    key_columns
+                ),
+            },
+            sort_keys=True,
+            separators=(
+                ",",
+                ":",
+            ),
+        )
+
+        digest = hashlib.sha256(
+            canonical.encode(
+                "utf-8"
+            )
+        ).hexdigest()[:24]
+
+        return (
+            f"bk_{digest}_uq"
+        )
+
+
+
+    def _validate_existing_business_keys(
+        self,
+        *,
+        cursor,
+        dataset_name: str,
+        key_columns: tuple[str, ...],
+    ) -> None:
+        """
+        Validate existing PostgreSQL rows before
+        enforcing a business-key unique index.
+
+        Only aggregate counts are read.
+        """
+
+        null_predicate = (
+            sql.SQL(
+                " OR "
+            ).join(
+                sql.SQL(
+                    "{} IS NULL"
+                ).format(
+                    sql.Identifier(
+                        column
+                    )
+                )
+                for column
+                in key_columns
+            )
+        )
+
+        cursor.execute(
+            sql.SQL(
+                "SELECT COUNT(*) "
+                "FROM {}.{} "
+                "WHERE {}"
+            ).format(
+                sql.Identifier(
+                    self.BRONZE_SCHEMA
+                ),
+                sql.Identifier(
+                    dataset_name
+                ),
+                null_predicate,
+            )
+        )
+
+        null_result = (
+            cursor.fetchone()
+        )
+
+        null_key_row_count = (
+            int(
+                null_result[0]
+            )
+            if (
+                null_result
+                and null_result[0]
+            )
+            else 0
+        )
+
+        if null_key_row_count:
+
+            raise BusinessKeyError(
+                "Existing warehouse table contains "
+                "null business-key values.",
+                details={
+                    "key_columns": list(
+                        key_columns
+                    ),
+                    "null_key_row_count": (
+                        null_key_row_count
+                    ),
+                },
+            )
+
+        key_identifiers = (
+            sql.SQL(
+                ", "
+            ).join(
+                sql.Identifier(
+                    column
+                )
+                for column
+                in key_columns
+            )
+        )
+
+        cursor.execute(
+            sql.SQL(
+                "SELECT COALESCE("
+                "SUM(duplicate_count), 0"
+                ") "
+                "FROM ("
+                "SELECT COUNT(*) AS duplicate_count "
+                "FROM {}.{} "
+                "GROUP BY {} "
+                "HAVING COUNT(*) > 1"
+                ") AS duplicate_groups"
+            ).format(
+                sql.Identifier(
+                    self.BRONZE_SCHEMA
+                ),
+                sql.Identifier(
+                    dataset_name
+                ),
+                key_identifiers,
+            )
+        )
+
+        duplicate_result = (
+            cursor.fetchone()
+        )
+
+        duplicate_key_row_count = (
+            int(
+                duplicate_result[0]
+            )
+            if (
+                duplicate_result
+                and duplicate_result[0]
+            )
+            else 0
+        )
+
+        if duplicate_key_row_count:
+
+            raise BusinessKeyError(
+                "Existing warehouse table contains "
+                "duplicate business-key values.",
+                details={
+                    "key_columns": list(
+                        key_columns
+                    ),
+                    "duplicate_key_row_count": (
+                        duplicate_key_row_count
+                    ),
+                },
+            )
+
+
+    def _ensure_business_key_index(
+        self,
+        *,
+        cursor,
+        dataset_name: str,
+        key_columns: tuple[str, ...],
+    ) -> None:
+        """
+        Ensure PostgreSQL can deterministically
+        enforce ON CONFLICT for this business key.
+        """
+
+        index_name = (
+            self._business_key_index_name(
+                dataset_name=(
+                    dataset_name
+                ),
+                key_columns=(
+                    key_columns
+                ),
+            )
+        )
+
+        self._validate_postgres_identifier(
+            index_name,
+            kind=(
+                "Business-key index name"
+            ),
+        )
+
+        key_identifiers = (
+            sql.SQL(
+                ", "
+            ).join(
+                sql.Identifier(
+                    column
+                )
+                for column
+                in key_columns
+            )
+        )
+
+        cursor.execute(
+            sql.SQL(
+                "CREATE UNIQUE INDEX "
+                "IF NOT EXISTS {} "
+                "ON {}.{} ({})"
+            ).format(
+                sql.Identifier(
+                    index_name
+                ),
+                sql.Identifier(
+                    self.BRONZE_SCHEMA
+                ),
+                sql.Identifier(
+                    dataset_name
+                ),
+                key_identifiers,
+            )
+        )
+
+
+    def merge_bronze_table(
+        self,
+        *,
+        dataset_name: str,
+        dataframe: pd.DataFrame,
+        business_key: BusinessKeyContract,
+    ) -> WarehouseLoadResult:
+        """
+        Deterministically merge a Bronze dataset
+        into PostgreSQL using its persisted
+        business-key contract.
+
+        Existing rows:
+            updated only when non-key values changed
+
+        New rows:
+            inserted
+
+        Missing incoming rows:
+            preserved
+
+        The table is never dropped or truncated.
+        """
+
+        safe_dataset_name = (
+            validate_dataset_name(
+                dataset_name
+            )
+        )
+
+        self._validate_postgres_identifier(
+            safe_dataset_name,
+            kind=(
+                "Warehouse table name"
+            ),
+        )
+
+        self._validate_dataframe(
+            dataframe
+        )
+
+        # Defense in depth. The caller is expected
+        # to validate as well, but the warehouse
+        # boundary must enforce the contract itself.
+        validate_business_key(
+            dataframe=dataframe,
+            contract=business_key,
+        )
+
+        key_columns = tuple(
+            business_key.columns
+        )
+
+        columns = list(
+            dataframe.columns
+        )
+
+        non_key_columns = [
+            column
+            for column
+            in columns
+            if column
+            not in key_columns
+        ]
+
+        column_identifiers = (
+            sql.SQL(
+                ", "
+            ).join(
+                sql.Identifier(
+                    column
+                )
+                for column
+                in columns
+            )
+        )
+
+        key_identifiers = (
+            sql.SQL(
+                ", "
+            ).join(
+                sql.Identifier(
+                    column
+                )
+                for column
+                in key_columns
+            )
+        )
+
+        rows = (
+            self._prepare_rows(
+                dataframe
+            )
+        )
+
+        connection = (
+            self._connect()
+        )
+
+        try:
+            connection.autocommit = False
+
+            with (
+                connection.cursor()
+                as cursor
+            ):
+
+                cursor.execute(
+                    sql.SQL(
+                        "CREATE SCHEMA "
+                        "IF NOT EXISTS {}"
+                    ).format(
+                        sql.Identifier(
+                            self.BRONZE_SCHEMA
+                        )
+                    )
+                )
+
+                # Preserve the existing additive-only
+                # physical schema policy.
+                self._synchronize_table_schema(
+                    cursor=cursor,
+                    dataset_name=(
+                        safe_dataset_name
+                    ),
+                    dataframe=dataframe,
+                )
+
+                # Existing historical rows must already
+                # satisfy the new row-identity contract.
+                self._validate_existing_business_keys(
+                    cursor=cursor,
+                    dataset_name=(
+                        safe_dataset_name
+                    ),
+                    key_columns=(
+                        key_columns
+                    ),
+                )
+
+                self._ensure_business_key_index(
+                    cursor=cursor,
+                    dataset_name=(
+                        safe_dataset_name
+                    ),
+                    key_columns=(
+                        key_columns
+                    ),
+                )
+
+                if rows:
+
+                    if non_key_columns:
+
+                        assignments = (
+                            sql.SQL(
+                                ", "
+                            ).join(
+                                sql.SQL(
+                                    "{} = EXCLUDED.{}"
+                                ).format(
+                                    sql.Identifier(
+                                        column
+                                    ),
+                                    sql.Identifier(
+                                        column
+                                    ),
+                                )
+                                for column
+                                in non_key_columns
+                            )
+                        )
+
+                        changed_predicate = (
+                            sql.SQL(
+                                " OR "
+                            ).join(
+                                sql.SQL(
+                                    "target.{} "
+                                    "IS DISTINCT FROM "
+                                    "EXCLUDED.{}"
+                                ).format(
+                                    sql.Identifier(
+                                        column
+                                    ),
+                                    sql.Identifier(
+                                        column
+                                    ),
+                                )
+                                for column
+                                in non_key_columns
+                            )
+                        )
+
+                        merge_query = (
+                            sql.SQL(
+                                "INSERT INTO {}.{} "
+                                "AS target ({}) "
+                                "VALUES %s "
+                                "ON CONFLICT ({}) "
+                                "DO UPDATE SET {} "
+                                "WHERE {}"
+                            ).format(
+                                sql.Identifier(
+                                    self.BRONZE_SCHEMA
+                                ),
+                                sql.Identifier(
+                                    safe_dataset_name
+                                ),
+                                column_identifiers,
+                                key_identifiers,
+                                assignments,
+                                changed_predicate,
+                            )
+                        )
+
+                    else:
+
+                        # A dataset consisting only of its
+                        # business-key columns has nothing
+                        # to update on conflict.
+                        merge_query = (
+                            sql.SQL(
+                                "INSERT INTO {}.{} "
+                                "AS target ({}) "
+                                "VALUES %s "
+                                "ON CONFLICT ({}) "
+                                "DO NOTHING"
+                            ).format(
+                                sql.Identifier(
+                                    self.BRONZE_SCHEMA
+                                ),
+                                sql.Identifier(
+                                    safe_dataset_name
+                                ),
+                                column_identifiers,
+                                key_identifiers,
+                            )
+                        )
+
+                    execute_values(
+                        cursor,
+                        merge_query,
+                        rows,
+                        page_size=1000,
+                    )
+
+            connection.commit()
+
+        except DatasetError:
+
+            connection.rollback()
+
+            raise
+
+        except psycopg2.Error as exc:
+
+            connection.rollback()
+
+            raise WarehouseLoadError(
+                "Failed to merge Bronze dataset "
+                f"'{safe_dataset_name}' into "
+                "PostgreSQL."
+            ) from exc
+
+        finally:
+
             connection.close()
 
         return WarehouseLoadResult(
