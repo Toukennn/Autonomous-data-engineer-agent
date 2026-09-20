@@ -8,7 +8,44 @@ The system uses **LangGraph** to route requests to specialized ETL and SQL agent
 
 > **LLMs decide what should happen. Deterministic code decides how it is allowed to happen.**
 
-The LLM may choose a supported workflow and produce typed plans, but it does **not** receive arbitrary Python execution, arbitrary filesystem access, unrestricted database access, unrestricted dbt execution, direct checkpoint control, or control over physical warehouse merge semantics.
+The LLM may choose a supported workflow and produce typed plans, but it does **not** receive arbitrary Python execution, unrestricted filesystem access, unrestricted database access, unrestricted dbt execution, direct checkpoint control, or control over physical warehouse merge semantics.
+
+---
+
+## Live Deployment
+
+The portfolio deployment is running on **Railway** with a private managed PostgreSQL service and persistent application storage.
+
+- **Swagger / OpenAPI:** https://autonomous-data-engineer-agent-production.up.railway.app/docs
+- **Liveness:** https://autonomous-data-engineer-agent-production.up.railway.app/health
+- **Readiness:** https://autonomous-data-engineer-agent-production.up.railway.app/ready
+- **Agent endpoint:** `POST https://autonomous-data-engineer-agent-production.up.railway.app/query`
+
+`/health` and `/ready` are public infrastructure endpoints. `/query` is protected by an `X-API-Key` header.
+
+The deployed PostgreSQL service is intentionally **not exposed through a public domain**.
+
+### Deployed request example
+
+```bash
+curl \
+  -X POST \
+  https://autonomous-data-engineer-agent-production.up.railway.app/query \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $SERVICE_API_KEY" \
+  -d '{
+    "message": "How many rows are in the Gold dataset dbt_dev_gold.mart_<dataset>?"
+  }'
+```
+
+Successful agent executions include separate correlation headers:
+
+```text
+X-Request-ID: <uuid4>
+X-Run-ID: <uuid4>
+```
+
+Never commit or publish the real `SERVICE_API_KEY`.
 
 ---
 
@@ -30,7 +67,7 @@ deterministic application code
 bounded execution
 ```
 
-The result is an agentic system that still demonstrates core data-engineering concerns:
+The result combines agentic orchestration with core data-engineering concerns:
 
 - resilient API ingestion
 - persistent incremental state
@@ -39,123 +76,192 @@ The result is an agentic system that still demonstrates core data-engineering co
 - business-key-aware merge/upsert
 - PostgreSQL warehousing
 - dynamically generated dbt models
-- dbt tests and contracts
+- dbt tests and quality contracts
 - governed SQL generation
 - AST-based SQL safety
 - lineage
 - execution observability
 - containerization
 - CI
+- cloud deployment
 - API authentication
 - liveness/readiness separation
-- bounded concurrency and HTTP wait time
+- bounded concurrency and request time
 - request/run correlation IDs
 - structured safe application logs
 
 ---
 
-# System Architecture
+# Cloud Architecture
 
-The application contains three primary agents:
-
-- **Data Engineer Agent** — top-level router.
-- **ETL Analyst Agent** — orchestrates governed ingestion and transformation workflows.
-- **SQL Analyst Agent** — translates analytical questions into validated read-only PostgreSQL queries.
-
-The production-oriented HTTP/container boundary added in Phases **2K** and **2L** now wraps the agent system:
+The production portfolio deployment runs as a single Railway application service backed by private PostgreSQL and one persistent application volume.
 
 ```text
-                           Client
-                             │
-                             │ HTTPS / HTTP
-                             ▼
-                         FastAPI
-              ┌──────────────┼──────────────┐
-              ▼              ▼              ▼
-          /health         /ready          /query
-          liveness       readiness       API-key protected
-              │              │              │
-              │              │              ├── request ID
-              │              │              ├── run ID
-              │              │              ├── single-run guard
-              │              │              └── HTTP timeout
-              │              │
-              │              ├── runtime storage
-              │              └── PostgreSQL
-              │
-              └── process only
-                                             │
-                                             ▼
-                                  Data Engineer Router
-                                  ┌──────────┴──────────┐
-                                  ▼                     ▼
-                             ETL Analyst            SQL Analyst
-                                  │                     │
-                                  ▼                     ▼
-                            External API          Governed catalog
-                                  │                     │
-                                  ▼                     ▼
-                         Durable Bronze FS        SQL generation
-                                  │                     │
-                                  ▼                     ▼
-                         PostgreSQL Bronze        SQLGlot AST
-                                  │                     │
-                                  ▼                     ▼
-                              dbt Silver          allowlist checks
-                                  │                     │
-                                  ▼                     ▼
-                              dbt Gold       read-only PostgreSQL
-                                  │                     │
-                                  └──────────┬──────────┘
-                                             ▼
-                                  lineage / observability
+                            Internet
+                               │
+                               │ HTTPS
+                               ▼
+                        Railway Edge
+                               │
+                               ▼
+                        FastAPI Service
+                ┌──────────────┼──────────────┐
+                ▼              ▼              ▼
+            /health         /ready          /query
+            public          public      X-API-Key protected
+                │              │              │
+                │              │              ├── request ID
+                │              │              ├── run ID
+                │              │              ├── single-run guard
+                │              │              └── HTTP timeout
+                │              │
+                │              ├── persistent runtime storage
+                │              └── private Railway PostgreSQL
+                │
+                └── process liveness
+                                               │
+                                               ▼
+                                    Data Engineer Router
+                                    ┌──────────┴──────────┐
+                                    ▼                     ▼
+                               ETL Analyst            SQL Analyst
+                                    │                     │
+                                    ▼                     ▼
+                              External API          Governed catalog
+                                    │                     │
+                                    ▼                     ▼
+                           Durable Bronze FS        SQL generation
+                                    │                     │
+                                    ▼                     ▼
+                           PostgreSQL Bronze        SQLGlot AST
+                                    │                     │
+                                    ▼                     ▼
+                                dbt Silver          allowlist checks
+                                    │                     │
+                                    ▼                     ▼
+                                dbt Gold       read-only PostgreSQL
+                                    │                     │
+                                    └──────────┬──────────┘
+                                               ▼
+                                    lineage / observability
 ```
 
-The warehouse-backed path is:
+The deployed application keeps durable runtime state under one Railway volume:
 
 ```text
+/app/runtime
+├── data
+│   ├── bronze
+│   ├── silver
+│   ├── gold
+│   ├── _state
+│   ├── _lineage
+│   └── _runs
+├── dbt
+│   ├── generated_metadata
+│   └── models
+└── home
+```
+
+Inside the image:
+
+```text
+/app/data  → /app/runtime/data
+/app/dbt   → /app/runtime/dbt
+HOME       → /app/runtime/home
+```
+
+The writable runtime home is required so the non-root API/dbt process can operate correctly in the cloud environment.
+
+---
+
+# Verified Cloud End-to-End Demo
+
+The deployed system has been tested through the **real public HTTPS boundary**, not only inside Docker or CI.
+
+A representative cloud validation used:
+
+```text
+https://randomuser.me/api/?results=5
+```
+
+with the record collection under:
+
+```text
+results
+```
+
+The requested pipeline was:
+
+```text
+Random User API
+      ↓
+5 source records
+      ↓
+Durable Bronze filesystem
+      ↓
+PostgreSQL Bronze
+      ↓
+dbt Silver
+      ↓
+dbt Gold
+      ↓
+Gold schema:
+gender
+email
+phone
+      ↓
+Governed SQL Analyst
+```
+
+The deployment successfully verified:
+
+- authenticated `POST /query` over public HTTPS
+- `200` response with distinct `X-Request-ID` and `X-Run-ID`
+- external API extraction
+- durable Bronze persistence
+- PostgreSQL Bronze synchronization
+- dbt Silver execution
+- dbt Gold execution
+- a Gold relation containing exactly `gender`, `email`, and `phone`
+- exactly **5 Gold rows**
+- governed SQL validation
+- read-only SQL execution
+- natural-language row-count analytics
+- retrieval of actual Gold values
+- persisted SQL execution records
+- successful application restart followed by continued access to the same warehouse data
+
+That validates the deployed path:
+
+```text
+HTTPS
+  ↓
+FastAPI
+  ↓
+LangGraph Router
+  ↓
+ETL Agent
+  ↓
 External API
-    │
-    ▼
-Deterministic ingestion
-    │
-    ▼
-Durable Bronze filesystem snapshot
-    │
-    ├── watermark checkpoint
-    ├── business-key contract
-    └── dataset fingerprint
-    │
-    ▼
-PostgreSQL bronze.<dataset>
-    │
-    ├── refresh_in_place
-    └── merge_upsert
-    │
-    ▼
-dbt
- ┌──┴──────────────────────────────┐
- ▼                                 ▼
-Silver views                    Gold marts
-                                  │
-                                  ├── table fallback
-                                  └── governed incremental
-    │                                 │
-    ├──────── dbt tests ──────────────┤
-    │                                 │
-    └──────── lineage / observability
-                                      │
-                                      ▼
-                             governed analytics catalog
-                                      │
-                                      ▼
-                                  SQL Analyst
-                                      │
-                                      ▼
-                              SQLGlot validation
-                                      │
-                                      ▼
-                            read-only PostgreSQL
+  ↓
+Persistent Bronze
+  ↓
+Private PostgreSQL
+  ↓
+dbt Silver
+  ↓
+dbt Gold
+  ↓
+Governed Catalog
+  ↓
+SQL Agent
+  ↓
+SQLGlot Validation
+  ↓
+Read-Only PostgreSQL
+  ↓
+HTTPS Response
 ```
 
 ---
@@ -185,7 +291,7 @@ Deterministic code controls:
 - model materialization
 - dbt selectors
 - quality enforcement
-- SQL allowlisting
+- SQL parsing and allowlisting
 - SQL execution mode
 - API authentication
 - concurrency
@@ -193,26 +299,45 @@ Deterministic code controls:
 - error sanitization
 - runtime observability metadata
 
-The model cannot directly execute arbitrary Python, shell commands, filesystem mutations, arbitrary SQL, arbitrary Jinja, unrestricted dbt commands, or unrestricted database writes.
+The model cannot directly execute arbitrary Python, shell commands, unrestricted filesystem mutations, arbitrary write SQL, arbitrary Jinja, unrestricted dbt commands, or unrestricted database writes.
+
+## SQL safety boundary
+
+Natural-language analytics use a governed catalog containing only approved Silver and Gold relations.
+
+Generated SQL must:
+
+1. parse as exactly one PostgreSQL query
+2. be read-only
+3. use schema-qualified physical relations
+4. reference only relations present in the governed catalog
+5. avoid Bronze, `public`, `information_schema`, and `pg_catalog`
+6. pass SQLGlot AST and relation-scope validation
+7. execute through the read-only database path
+8. respect statement timeouts and row limits
+
+If validation fails, SQL is **not executed**.
+
+This provides a deterministic enforcement boundary even when the model proposes an incorrect or unsupported query.
 
 ---
 
 # Agent Architecture
 
+The application contains three primary agents.
+
 ## Data Engineer Router
 
-The top-level LangGraph router classifies each request into one of two workflows:
+The top-level LangGraph router classifies a user request into:
 
 ```text
 etl
 sql
 ```
 
-and delegates execution to the appropriate specialist.
+and delegates to the appropriate specialist.
 
 ![Data Engineer Graph](data_engineer_graph.png)
-
----
 
 ## ETL Analyst
 
@@ -269,8 +394,6 @@ Dependent stages execute sequentially. A failed required stage prevents downstre
 
 ![ETL Analyst Graph](etl_analyst_graph.png)
 
----
-
 ## SQL Analyst
 
 The SQL Analyst exposes governed natural-language analytics over approved dbt Silver and Gold relations.
@@ -299,7 +422,7 @@ scope-aware schema/relation allowlist
         natural-language answer
 ```
 
-The same catalog snapshot is used for prompt context and deterministic SQL validation, reducing prompt-time / validation-time drift.
+The same governed catalog snapshot is used for prompt context and deterministic SQL validation.
 
 ![SQL Analyst Graph](sql_analyst_graph.png)
 
@@ -341,7 +464,7 @@ string_transform
 groupby_aggregate
 ```
 
-The planner does not write arbitrary SQL or Jinja.
+The planner does not write arbitrary dbt SQL or Jinja.
 
 ```text
 User request
@@ -373,11 +496,60 @@ Contracts are stored and enforced by deterministic application code.
 
 ---
 
+# Data Platform Architecture
+
+The warehouse-backed path is:
+
+```text
+External API
+    │
+    ▼
+Deterministic ingestion
+    │
+    ▼
+Durable Bronze filesystem snapshot
+    │
+    ├── watermark checkpoint
+    ├── business-key contract
+    └── dataset fingerprint
+    │
+    ▼
+PostgreSQL bronze.<dataset>
+    │
+    ├── refresh_in_place
+    └── merge_upsert
+    │
+    ▼
+dbt
+ ┌──┴──────────────────────────────┐
+ ▼                                 ▼
+Silver views                    Gold marts
+                                  │
+                                  ├── table fallback
+                                  └── governed incremental
+    │                                 │
+    ├──────── dbt tests ──────────────┤
+    │                                 │
+    └──────── lineage / observability
+                                      │
+                                      ▼
+                             governed analytics catalog
+                                      │
+                                      ▼
+                                  SQL Analyst
+                                      │
+                                      ▼
+                              SQLGlot validation
+                                      │
+                                      ▼
+                            read-only PostgreSQL
+```
+
+---
+
 # Development Phases
 
 ## Phase 2A — Reliable API Ingestion ✅
-
-HTTP behavior was moved out of the agent layer and into a deterministic API client.
 
 Implemented:
 
@@ -398,8 +570,6 @@ Implemented:
 
 Authenticated outbound requests require HTTPS.
 
----
-
 ## Phase 2B — Persistent Incremental Ingestion ✅
 
 Watermark checkpoints are persisted under:
@@ -407,8 +577,6 @@ Watermark checkpoints are persisted under:
 ```text
 data/_state/
 ```
-
-The LLM may identify logical incremental fields, but deterministic code owns checkpoint loading and advancement.
 
 Checkpoint state advances only after required durable writes succeed.
 
@@ -421,8 +589,6 @@ no business key
 business key configured
     → incoming rows replace historical rows with the same key
 ```
-
----
 
 ## Phase 2C — Schema Evolution ✅
 
@@ -444,11 +610,7 @@ Implemented:
 - schema history
 - deterministic rejection reports
 
----
-
 ## Phase 2D — Medallion Architecture + Lineage ✅
-
-File-backed Medallion structure:
 
 ```text
 data/bronze/<dataset>/
@@ -456,17 +618,11 @@ data/silver/<dataset>/
 data/gold/<dataset>/
 ```
 
-Bronze stores source data and extraction/schema metadata. Silver consumes Bronze only. Gold consumes Silver only.
-
 Deterministic lineage is persisted under:
 
 ```text
 data/_lineage/lineage.json
 ```
-
-Supported lineage event types include extraction, transformation, curation, warehouse synchronization, and dbt builds.
-
----
 
 ## Phase 2E — Agent Runtime Reliability + CI ✅
 
@@ -478,29 +634,17 @@ Implemented:
 - structured execution records
 - GitHub Actions CI
 
-`ExecutionRunStore` persists agent-level runtime records under:
+Execution records are persisted under:
 
 ```text
 data/_runs/
 ```
 
-Default ETL tool-call limit:
-
-```text
-ETL_MAX_TOOL_CALLS=8
-```
-
----
-
 ## Phase 2F — Data Quality + Contracts ✅
 
-Quality rules are represented as typed contracts instead of free-form LLM instructions.
+Quality rules are represented as typed contracts rather than free-form LLM instructions.
 
 Contracts can be synchronized into deterministic checks and dbt tests.
-
-The model cannot silently weaken an established contract or bypass required quality checks.
-
----
 
 ## Phase 2G — PostgreSQL Warehouse Bridge ✅
 
@@ -519,10 +663,6 @@ merge_upsert
 
 `merge_upsert` is selected only when a trusted business-key contract exists.
 
-The application, not the LLM, owns merge SQL and physical uniqueness enforcement.
-
----
-
 ## Phase 2H — dbt Integration ✅
 
 Implemented:
@@ -536,9 +676,7 @@ Implemented:
 - deterministic model metadata
 - controlled selectors and project/profile paths
 
-Generated model SQL comes from validated typed plans, not arbitrary LLM-produced dbt code.
-
----
+Generated model SQL comes from validated typed plans rather than arbitrary LLM-generated dbt code.
 
 ## Phase 2I — Governed Warehouse Analytics ✅
 
@@ -554,11 +692,7 @@ Implemented:
 - SQL execution observability
 - end-to-end governed analytics validation
 
----
-
 ## Phase 2J — Incremental Warehouse Processing ✅
-
-Phase 2J extended incremental semantics into the PostgreSQL/dbt path.
 
 Implemented:
 
@@ -572,13 +706,9 @@ Implemented:
 2J.6B  Two-run incremental E2E validation
 ```
 
-The two-run E2E path verifies that a subsequent run updates/inserts the correct rows without rebuilding the full logical dataset incorrectly.
+## Phase 2K — Containerized Runtime & Deployment Foundation ✅
 
----
-
-# Phase 2K — Containerized Runtime & Deployment Foundation ✅
-
-Phase 2K moved the project from a local Python application into a reproducible containerized service boundary.
+Implemented:
 
 ```text
 2K.1  FastAPI HTTP runtime                    ✅
@@ -592,120 +722,19 @@ Phase 2K moved the project from a local Python application into a reproducible c
 2K.9  Docker build/smoke gate in CI            ✅
 ```
 
-## FastAPI runtime
-
-The application is exposed through `app/api.py`.
-
-Primary endpoints:
-
-| Endpoint | Purpose | Authentication |
-|---|---|---|
-| `GET /health` | cheap process liveness | public |
-| `GET /ready` | dependency readiness | public |
-| `POST /query` | governed agent execution | `X-API-Key` |
-
-The HTTP boundary keeps LLM construction lazy, allowing infrastructure probes to operate without contacting the LLM.
-
-## Docker image
-
-The Docker image:
+The image:
 
 - uses Python 3.12 slim
-- installs dependencies with `uv`
-- pins the copied `uv` binary
-- runs as non-root UID/GID `10001`
-- keeps application source root-owned
-- grants write access only to required runtime/dbt directories
+- installs with `uv`
+- runs the application as UID/GID `10001`
 - exposes port `8000`
-- runs one Uvicorn worker
-- uses `/app/data` as `DATA_ROOT`
+- uses one Uvicorn worker
+- keeps durable state under `/app/runtime`
+- provides a writable runtime home under `/app/runtime/home`
 
-The single-worker choice is deliberate because the current runtime contains process-local locks, local durable state, and generated dbt files.
+## Phase 2L — Production API Hardening ✅
 
-## Docker health check
-
-Docker checks:
-
-```text
-GET /health
-```
-
-rather than `/ready`.
-
-This means a temporary PostgreSQL outage does not incorrectly classify the API process itself as dead.
-
-## Docker Compose
-
-`compose.yaml` runs:
-
-```text
-app
-PostgreSQL 17
-```
-
-on a private bridge network.
-
-PostgreSQL readiness is checked with `pg_isready`.
-
-Named volumes persist:
-
-- PostgreSQL data
-- application durable state
-- generated dbt metadata
-- generated dbt sources
-- generated staging models
-- generated marts
-
-## Full containerized E2E
-
-`scripts/phase_2k_e2e.py` validates the real container path:
-
-```text
-HTTP
-  ↓
-Agent
-  ↓
-External API
-  ↓
-Bronze
-  ↓
-PostgreSQL
-  ↓
-dbt Silver
-  ↓
-dbt Gold
-  ↓
-governed SQL
-```
-
-The script also verifies persisted container state and warehouse row counts.
-
-## Container CI gate
-
-The GitHub Actions workflow now has two major gates:
-
-```text
-Python quality gate
-    ├── Ruff
-    ├── pytest
-    └── uv build
-         ↓
-Docker gate
-    ├── build image
-    ├── start container
-    ├── wait for Docker health
-    ├── verify /health
-    ├── verify non-root UID 10001
-    └── verify DATA_ROOT=/app/data
-```
-
-No real LLM or database credentials are embedded in CI.
-
----
-
-# Phase 2L — Production API Hardening ✅
-
-Phase 2L hardened the public HTTP boundary before cloud deployment.
+Implemented:
 
 ```text
 2L.1  Liveness vs readiness separation      ✅
@@ -716,44 +745,23 @@ Phase 2L hardened the public HTTP boundary before cloud deployment.
 2L.6  Safe structured HTTP observability     ✅
 ```
 
-## 2L.1 — Liveness vs readiness
+### Liveness vs readiness
 
-`GET /health` is intentionally cheap:
+`GET /health` is intentionally cheap and does not contact PostgreSQL, the LLM, or external APIs.
 
-```text
-process alive?
-    ↓
-200 {"status":"ok"}
-```
-
-It does not contact PostgreSQL, the LLM, or external APIs.
-
-`GET /ready` verifies whether the instance can accept governed work:
+`GET /ready` verifies:
 
 ```text
 runtime storage writable?
         +
 PostgreSQL reachable?
         ↓
-200 {"status":"ready"}
+ready
 ```
 
-Failure is sanitized:
-
-```text
-503
-{"detail":"Service is not ready."}
-```
-
-Database passwords, hostnames, filesystem paths, stack traces, and raw driver errors are not exposed through the HTTP response.
-
----
-
-## 2L.2 — Explicit busy/concurrency handling
+### Busy/concurrency behavior
 
 The current runtime intentionally permits one agent execution at a time.
-
-The execution lock is acquired non-blockingly.
 
 ```text
 execution slot free
@@ -766,131 +774,43 @@ execution slot occupied
 Retry-After: 5
 ```
 
-A second caller therefore does not sit in an invisible unbounded in-process queue.
-
----
-
-## 2L.3 — Bounded HTTP execution wait
-
-Agent HTTP requests have a configurable wait limit:
+### HTTP execution timeout
 
 ```text
 AGENT_REQUEST_TIMEOUT_SECONDS=600
 ```
 
-If the HTTP deadline is exceeded:
+The timeout bounds how long HTTP waits. It does not unsafely terminate an arbitrary Python worker.
 
-```text
-504
-{"detail":"Agent request timed out."}
-```
+### Authentication
 
-Important: this is an **HTTP deadline, not unsafe thread cancellation**.
-
-Python cannot safely terminate an arbitrary running thread. Therefore, if a request times out while the underlying agent is still finishing durable work, the execution lock remains held until that worker actually terminates.
-
-```text
-client waits
-    ↓
-HTTP deadline reached
-    ↓
-504 returned
-    ↓
-underlying worker may still be running
-    ↓
-execution slot remains BUSY
-    ↓
-worker really finishes
-    ↓
-lock released
-```
-
-This prevents a timed-out execution from overlapping with a new run and mutating shared state concurrently.
-
----
-
-## 2L.4 — Inbound API-key authentication
-
-`POST /query` is protected with:
+`POST /query` requires:
 
 ```text
 X-API-Key: <SERVICE_API_KEY>
 ```
 
-The configured key is stored separately from outbound API-ingestion credentials.
+Inbound service authentication is deliberately separate from outbound external-API authentication.
 
-```text
-API_AUTH_TOKEN
-    → outbound authentication
-      Agent → external API
+### Correlation IDs
 
-SERVICE_API_KEY
-    → inbound authentication
-      client → this FastAPI service
-```
-
-The key is validated with constant-time comparison and must be at least 32 characters.
-
-If inbound authentication is not configured correctly, the service fails closed for protected work.
-
-`/health` and `/ready` remain public so container/orchestrator probes do not need application credentials.
-
----
-
-## 2L.5 — Request and run correlation IDs
-
-Every HTTP request receives a server-generated request ID:
+Every request receives:
 
 ```text
 X-Request-ID
 ```
 
-An actual agent execution also receives a separate run ID:
+Agent executions additionally receive:
 
 ```text
 X-Run-ID
 ```
 
-Semantics:
+### Safe HTTP observability
 
-```text
-HTTP request
-    └── request_id
+Structured JSON events are emitted to stdout.
 
-agent execution starts
-    └── run_id
-```
-
-A busy request receives an `X-Request-ID` but no `X-Run-ID`, because no agent execution actually began.
-
-These IDs connect HTTP responses to structured runtime logs.
-
----
-
-## 2L.6 — Safe structured HTTP observability
-
-`utils/http_observability.py` emits newline-delimited structured JSON to stdout.
-
-Example:
-
-```json
-{"duration_ms":2.734,"event":"http_request.completed","method":"GET","path":"/health","request_id":"...","status_code":200}
-```
-
-Run-level events include:
-
-```text
-agent_run.started
-agent_run.completed
-agent_run.failed
-agent_run.busy
-agent_run.submission_failed
-agent_run.http_timeout
-```
-
-The logger uses an explicit metadata allowlist.
-
-It deliberately does **not** log:
+The logger deliberately excludes:
 
 - request bodies
 - user prompts
@@ -900,9 +820,34 @@ It deliberately does **not** log:
 - database credentials
 - raw exception messages
 
-Observability failures are designed not to fail an otherwise valid workflow.
+## Phase 2M — Real Cloud Deployment ✅
 
-This stdout-oriented design is intentionally cloud-friendly: a deployment platform can collect container logs without requiring a custom logging backend inside the application.
+The application is now deployed on Railway with:
+
+```text
+public HTTPS application
+        +
+private managed PostgreSQL
+        +
+persistent application volume
+```
+
+Completed cloud validation includes:
+
+```text
+2M.1   Single-volume cloud persistence             ✅
+2M.2   Railway project                             ✅
+2M.3   Managed PostgreSQL                          ✅
+2M.4   Runtime variables and secret configuration  ✅
+2M.5   Persistent /app/runtime volume              ✅
+2M.6   /health deployment health check             ✅
+2M.7   Public HTTPS domain                         ✅
+2M.8   Remote /health + /ready + auth validation   ✅
+2M.9   Real remote ETL + governed SQL demo         ✅
+2M.10  Restart/persistence validation              ✅
+```
+
+The deployed application survived a service restart and continued querying the previously created warehouse data.
 
 ---
 
@@ -910,8 +855,16 @@ This stdout-oriented design is intentionally cloud-friendly: a deployment platfo
 
 ## Liveness
 
+Local:
+
 ```bash
 curl http://127.0.0.1:8000/health
+```
+
+Cloud:
+
+```bash
+curl https://autonomous-data-engineer-agent-production.up.railway.app/health
 ```
 
 Expected:
@@ -922,8 +875,16 @@ Expected:
 
 ## Readiness
 
+Local:
+
 ```bash
 curl http://127.0.0.1:8000/ready
+```
+
+Cloud:
+
+```bash
+curl https://autonomous-data-engineer-agent-production.up.railway.app/ready
 ```
 
 Expected when dependencies are ready:
@@ -934,20 +895,26 @@ Expected when dependencies are ready:
 
 ## Agent query
 
+Local:
+
 ```bash
 curl \
   -X POST \
   http://127.0.0.1:8000/query \
   -H "Content-Type: application/json" \
   -H "X-API-Key: $SERVICE_API_KEY" \
-  -d '{"message":"Build a warehouse-backed pipeline from the users API."}'
+  -d '{"message":"Build a warehouse-backed pipeline from an external API."}'
 ```
 
-Successful responses include correlation headers similar to:
+Cloud:
 
-```text
-X-Request-ID: <uuid>
-X-Run-ID: <uuid>
+```bash
+curl \
+  -X POST \
+  https://autonomous-data-engineer-agent-production.up.railway.app/query \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $SERVICE_API_KEY" \
+  -d '{"message":"How many rows are in my Gold dataset? Use the governed warehouse analytics path."}'
 ```
 
 ---
@@ -962,10 +929,16 @@ Local default:
 <project>/data
 ```
 
-Docker:
+Docker/cloud logical path:
 
 ```text
 /app/data
+```
+
+In the current image, `/app/data` resolves into:
+
+```text
+/app/runtime/data
 ```
 
 Important durable areas include:
@@ -980,13 +953,13 @@ data/
 └── _runs/
 ```
 
-Generated dbt runtime state is stored under controlled dbt directories and persisted through named Docker volumes in the Compose environment.
+The generated dbt project/runtime state also lives under the persistent `/app/runtime` tree in the deployed container.
 
 ---
 
 # PostgreSQL Layout
 
-The warehouse uses controlled schemas, including a Bronze ingestion schema and dbt-managed analytical schemas.
+The warehouse uses controlled schemas.
 
 Conceptually:
 
@@ -998,22 +971,17 @@ bronze
 <dbt target>_gold
 ```
 
-Natural-language SQL analytics are restricted to the governed analytical catalog.
+With the default target schema:
 
----
+```text
+bronze
+    ↓
+dbt_dev_silver
+    ↓
+dbt_dev_gold
+```
 
-# Read-Only SQL Execution
-
-Generated analytical SQL is treated as untrusted.
-
-Before execution it is:
-
-1. parsed with SQLGlot
-2. checked for allowed query structure
-3. checked against the governed relation catalog
-4. restricted to approved schemas/relations
-5. executed through a read-only database path
-6. bounded by statement timeout and row limits
+Natural-language SQL analytics are restricted to the governed analytical catalog built from approved Silver and Gold relations.
 
 ---
 
@@ -1046,6 +1014,7 @@ Before execution it is:
 │   └── warehouse_keys.py
 │
 ├── scripts/
+│   ├── container_entrypoint.py
 │   ├── phase_2i_e2e.py
 │   ├── phase_2j_e2e.py
 │   └── phase_2k_e2e.py
@@ -1105,6 +1074,7 @@ Before execution it is:
 - **dbt / dbt-postgres**
 - **SQLGlot**
 - **Docker / Docker Compose**
+- **Railway**
 - **uv**
 - **pytest**
 - **Ruff**
@@ -1137,40 +1107,38 @@ DB_NAME=...
 SERVICE_API_KEY=...
 ```
 
-Generate a strong inbound service key with:
+Generate a strong inbound service key:
 
 ```bash
 uv run python -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
 
-Then start the stack:
+Then:
 
 ```bash
 docker compose up -d --build
 ```
 
-Check it:
+Check:
 
 ```bash
 curl http://127.0.0.1:8000/health
 curl http://127.0.0.1:8000/ready
 ```
 
-Stop it with:
+Stop:
 
 ```bash
 docker compose down
 ```
 
-To remove the stack **and its named volumes**:
+Remove the stack and named volumes:
 
 ```bash
 docker compose down -v
 ```
 
 Use `-v` carefully because it removes persisted PostgreSQL/application state.
-
----
 
 ## Option B — Local Python runtime
 
@@ -1200,7 +1168,7 @@ Start from:
 .env.example
 ```
 
-Important configuration groups include:
+Important groups include:
 
 ## LLM providers
 
@@ -1266,45 +1234,38 @@ DBT_THREADS=4
 SERVICE_API_KEY=replace_with_a_random_secret_at_least_32_characters
 ```
 
-`SERVICE_API_KEY` protects this application's `POST /query` endpoint.
+`SERVICE_API_KEY` protects `POST /query`.
 
 Never commit the real `.env`.
 
 ---
 
-# Running the System
-
-## Local API
-
-```bash
-uv run uvicorn app.api:app --host 0.0.0.0 --port 8000
-```
-
-## Docker
-
-```bash
-docker compose up -d --build
-```
-
-## Logs
-
-Application and structured HTTP logs can be viewed with:
-
-```bash
-docker compose logs -f app
-```
-
-Structured safe events are written to stdout alongside the runtime logs.
-
----
-
 # Container Persistence
 
-The app stores durable runtime state in one volume mounted at `/app/runtime`. Both `/app/data` and the entire `/app/dbt` project are symlinks into that volume. At startup, the entrypoint copies versioned dbt project files into the volume without removing generated models or metadata. Compose mounts the `agent_runtime` volume there.
+The application stores durable runtime state in one volume mounted at:
 
-On Railway, mount the app volume at `/app/runtime` and set `RAILWAY_RUN_UID=0` on the service. Railway mounts volumes as root; the container entrypoint prepares the volume and then starts Uvicorn as UID/GID 10001. Keep `PERSIST_ROOT=/app/runtime` so it matches the image symlinks.
+```text
+/app/runtime
+```
 
-The previous five Compose volumes are not copied into `agent_runtime` automatically. Migrate their contents before recreating the app container if you need existing ETL and dbt state. Keep the old volumes until the new runtime state is verified.
+Both the application data path and dbt project are routed through that persistent root.
+
+The container entrypoint:
+
+1. creates required runtime directories
+2. copies version-controlled dbt seed/project files into the runtime dbt tree
+3. preserves generated models and metadata
+4. prepares volume ownership when started with elevated runtime permissions
+5. drops privileges to UID/GID `10001`
+6. starts Uvicorn
+
+The image sets:
+
+```text
+HOME=/app/runtime/home
+```
+
+so dbt and other runtime tools have a writable home after the process drops privileges.
 
 ---
 
@@ -1317,15 +1278,9 @@ uv run ruff check .
 uv run pytest -v
 ```
 
-A package build is also checked by CI:
+CI additionally checks a package build and Docker runtime behavior.
 
-```bash
-uv build
-```
-
-## Important test coverage
-
-The test suite covers, among other things:
+Important coverage includes:
 
 - API retry and pagination behavior
 - SSRF/public-network validation
@@ -1358,7 +1313,9 @@ scripts/phase_2j_e2e.py
 scripts/phase_2k_e2e.py
 ```
 
-Phase 2K verifies the real containerized path through API → agent → data pipeline → warehouse → governed SQL.
+Phase 2K verifies the containerized API → agent → pipeline → warehouse → governed SQL path.
+
+The Railway deployment has additionally been validated manually through the public HTTPS boundary.
 
 ---
 
@@ -1366,7 +1323,7 @@ Phase 2K verifies the real containerized path through API → agent → data pip
 
 GitHub Actions runs on pushes and pull requests to `main`.
 
-The workflow currently validates:
+The workflow validates:
 
 ```text
 Ruff
@@ -1383,12 +1340,58 @@ Docker health
   ↓
 /health smoke test
   ↓
-non-root UID check
+non-root runtime check
   ↓
-DATA_ROOT check
+resolved DATA_ROOT check
 ```
 
-The application container is intentionally smoke-tested without real database/LLM secrets because `/health` is a dependency-free liveness endpoint.
+Real provider/database secrets are not embedded in CI.
+
+---
+
+# Observability
+
+The project already provides lightweight operational observability suitable for the current portfolio-scale deployment.
+
+## HTTP-level observability
+
+Structured JSON events are emitted to stdout and collected by the deployment platform.
+
+Examples include:
+
+```text
+http_request.completed
+agent_run.started
+agent_run.completed
+agent_run.failed
+agent_run.busy
+agent_run.http_timeout
+```
+
+## Correlation
+
+```text
+X-Request-ID
+X-Run-ID
+```
+
+allow HTTP responses to be correlated with runtime events.
+
+## Durable execution records
+
+Agent-level execution records are persisted under:
+
+```text
+data/_runs/
+```
+
+ETL and SQL execution records include bounded operational metadata such as status, duration, validated relations, and result counts where appropriate.
+
+## dbt evidence
+
+dbt artifacts and deterministic metadata are used to record model execution state without exposing compiled SQL or secrets through the public API.
+
+A separate Prometheus/Grafana/OpenTelemetry stack is intentionally **not required for portfolio v1**. Centralized observability can be added later if the project evolves into a multi-instance or production-operated service.
 
 ---
 
@@ -1411,37 +1414,38 @@ Internal exception text, credentials, provider errors, and stack traces are not 
 
 # Current Durability Model
 
-The project currently combines:
+The portfolio deployment combines:
 
-- local persistent application files
-- named Docker volumes
-- PostgreSQL
+- a Railway persistent application volume
+- managed PostgreSQL
 - generated dbt runtime files
+- persistent checkpoints, lineage, and run records
 
-This is appropriate for a **single-instance deployment**.
+This is intentionally designed for a **single-instance deployment**.
 
-The application intentionally runs one Uvicorn worker because coordination is currently process-local.
+The application runs one Uvicorn worker because coordination is currently process-local.
 
-A future horizontally scaled deployment would need distributed coordination and externalized state.
+A future horizontally scaled deployment would require distributed coordination and more fully externalized operational state.
 
 ---
 
 # Current Limitations
 
-The current version is intentionally bounded.
+The current version is intentionally bounded:
 
-- One application process / one Uvicorn worker is supported.
-- Only one agent execution is allowed at a time.
-- An HTTP timeout does not forcibly cancel a running Python worker.
-- Checkpoints, lineage, execution records, and generated dbt state are still local-volume-backed.
-- The project does not yet use a distributed task queue.
-- It does not yet implement horizontal multi-replica coordination.
-- It has not yet been deployed to a public cloud environment as part of the repository milestone.
-- Structured HTTP logs are emitted to stdout but are not yet shipped to a centralized observability backend.
-- Advanced CDC/deletion/tombstone semantics are outside the current v1 scope.
-- SCD Type 2/history modeling is outside the current v1 scope.
+- one application process / one Uvicorn worker
+- one active agent execution at a time
+- synchronous `/query` execution
+- HTTP timeout does not forcibly cancel an already-running Python worker
+- checkpoints, lineage, execution records, and generated dbt state rely on one persistent application volume
+- no distributed task queue
+- no horizontal multi-replica coordination
+- no advanced CDC deletion/tombstone semantics
+- no SCD Type 2 history modeling
+- no heavy centralized metrics/trace stack
+- explicit deterministic catalog validation exists, but semantic grounding of arbitrary user-supplied dataset names can still be strengthened further
 
-These limitations are explicit rather than hidden behind unsupported concurrency assumptions.
+These are explicit scope boundaries for portfolio v1 rather than hidden production claims.
 
 ---
 
@@ -1463,47 +1467,26 @@ These limitations are explicit rather than hidden behind unsupported concurrency
 | 2J | Incremental warehouse processing | ✅ |
 | 2K | FastAPI + Docker + Compose + container CI | ✅ |
 | 2L | Production API hardening | ✅ |
+| 2M | Railway cloud deployment + remote E2E validation | ✅ |
 
-## Portfolio v1 — Remaining milestones
-
-### Phase 2M — Real Cloud Deployment
-
-Planned goals:
-
-- deploy the existing container
-- use managed PostgreSQL
-- HTTPS/TLS
-- runtime secret management
-- deployment-specific configuration
-- verify `/health` and `/ready` in the deployed environment
-- demonstrate the real remote API boundary
-
-### Phase 2N — Centralized Observability
-
-Planned goals:
-
-- collect structured application logs centrally
-- basic error/latency metrics
-- request/run ID searchability
-- deployment-level alerts
-- LLM usage/cost visibility where practical
+## Portfolio v1 — Final milestone
 
 ### Phase 2R — Final Validation + Release Polish
 
-Planned goals:
+Remaining portfolio-polish work:
 
-- deployed end-to-end validation
-- restart/persistence tests
-- moderate load/boundary testing
-- final architecture diagram
-- concise demo
-- clean setup/deployment documentation
-- `v1.0.0` release
+- final README and architecture presentation
+- optional short GIF/video demo
+- final regression run
+- small semantic-grounding cleanup where useful
+- `v1.0.0` release/tag
 
-## Optional post-v1 work
+## Deferred / optional post-v1 work
 
-Useful extensions that are deliberately **not blockers** for the portfolio release:
+Useful extensions that are deliberately **not blockers**:
 
+- centralized metrics/tracing stack
+- LLM cost dashboards
 - asynchronous job queue / worker model
 - externally coordinated distributed state
 - multi-replica execution
@@ -1511,14 +1494,14 @@ Useful extensions that are deliberately **not blockers** for the portfolio relea
 - SCD Type 2 history
 - row-level quarantine datasets
 - richer lineage backends
-- deeper security/operational controls
 - external workflow orchestration
+- deeper enterprise security controls
 
 ---
 
 # Portfolio / CV Summary
 
-This repository demonstrates an end-to-end data-engineering system that combines traditional data-platform engineering with guarded LLM orchestration:
+This repository demonstrates an end-to-end data-engineering system combining traditional data-platform engineering with guarded LLM orchestration:
 
 ```text
 resilient ingestion
@@ -1543,9 +1526,11 @@ FastAPI
     +
 Docker
     +
-CI/CD foundations
+GitHub Actions
     +
-API hardening
+Railway deployment
+    +
+managed PostgreSQL
 ```
 
 The central design decision is that **LLMs remain planners and routers while deterministic code owns sensitive physical execution**.
