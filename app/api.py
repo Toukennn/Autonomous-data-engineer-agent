@@ -1,3 +1,4 @@
+import os
 import threading
 
 from fastapi import (
@@ -13,6 +14,15 @@ from pydantic import (
     BaseModel,
     Field,
     field_validator,
+)
+
+from config.settings import (
+    get_database_settings,
+    get_runtime_settings,
+)
+
+from utils.database import (
+    DatabaseUtil,
 )
 
 
@@ -53,6 +63,21 @@ app = FastAPI(
 _AGENT_EXECUTION_LOCK = (
     threading.Lock()
 )
+
+
+# ============================================================
+# READINESS LIMITS
+# ============================================================
+#
+# Readiness must fail quickly.
+#
+# These limits are intentionally much smaller than normal
+# analytical-query limits.
+# ============================================================
+
+_READINESS_DB_CONNECT_TIMEOUT_SECONDS = 3
+
+_READINESS_DB_STATEMENT_TIMEOUT_MS = 2_000
 
 
 # ============================================================
@@ -101,6 +126,12 @@ class HealthResponse(
     status: str
 
 
+class ReadinessResponse(
+    BaseModel
+):
+    status: str
+
+
 # ============================================================
 # LAZY AGENT LOADING
 # ============================================================
@@ -111,8 +142,8 @@ def _get_data_engineer():
     Import the LangGraph application lazily.
 
     This allows infrastructure endpoints such as
-    /health to start without constructing LLM
-    clients during module import.
+    /health and /ready to work without constructing
+    LLM clients during module import.
     """
 
     from agents.data_engineer import (
@@ -182,7 +213,94 @@ def _extract_final_response(
 
 
 # ============================================================
-# HEALTH
+# READINESS CHECKS
+# ============================================================
+
+
+def _check_runtime_storage_ready() -> None:
+    """
+    Verify that the application runtime storage
+    exists and is writable.
+
+    No runtime path is exposed through the HTTP
+    response if this check fails.
+    """
+
+    runtime_settings = (
+        get_runtime_settings()
+    )
+
+    data_root = (
+        runtime_settings.data_root
+    )
+
+    if (
+        not data_root.exists()
+        or not data_root.is_dir()
+    ):
+        raise RuntimeError(
+            "Runtime storage is unavailable."
+        )
+
+    if not os.access(
+        data_root,
+        os.W_OK | os.X_OK,
+    ):
+        raise RuntimeError(
+            "Runtime storage is not writable."
+        )
+
+
+def _check_database_ready() -> None:
+    """
+    Verify that PostgreSQL is reachable using a
+    short connection and statement timeout.
+
+    The readiness probe performs only a deterministic
+    read-only SELECT 1.
+    """
+
+    database_config = (
+        get_database_settings()
+        .psycopg_config()
+    )
+
+    database_config[
+        "connect_timeout"
+    ] = (
+        _READINESS_DB_CONNECT_TIMEOUT_SECONDS
+    )
+
+    database = (
+        DatabaseUtil(
+            database_config
+        )
+    )
+
+    result = (
+        database
+        .execute_read_only_result(
+            "SELECT 1 AS ready",
+            statement_timeout_ms=(
+                _READINESS_DB_STATEMENT_TIMEOUT_MS
+            ),
+            max_rows=1,
+        )
+    )
+
+    if (
+        result.row_count != 1
+        or result.rows != (
+            (1,),
+        )
+    ):
+        raise RuntimeError(
+            "Database readiness check failed."
+        )
+
+
+# ============================================================
+# LIVENESS
 # ============================================================
 
 
@@ -192,14 +310,59 @@ def _extract_final_response(
 )
 def health() -> HealthResponse:
     """
-    Lightweight process health endpoint.
+    Lightweight process-liveness endpoint.
 
-    This intentionally does not contact the LLM
-    or PostgreSQL.
+    This intentionally does not contact:
+
+    - PostgreSQL
+    - the LLM
+    - external APIs
     """
 
     return HealthResponse(
         status="ok"
+    )
+
+
+# ============================================================
+# READINESS
+# ============================================================
+
+
+@app.get(
+    "/ready",
+    response_model=ReadinessResponse,
+)
+def ready() -> ReadinessResponse:
+    """
+    Determine whether this application instance can
+    currently accept governed agent work.
+
+    Readiness requires:
+
+    - usable runtime storage
+    - reachable PostgreSQL
+
+    Raw internal errors are deliberately not exposed.
+    """
+
+    try:
+
+        _check_runtime_storage_ready()
+
+        _check_database_ready()
+
+    except Exception:
+
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Service is not ready."
+            ),
+        ) from None
+
+    return ReadinessResponse(
+        status="ready"
     )
 
 

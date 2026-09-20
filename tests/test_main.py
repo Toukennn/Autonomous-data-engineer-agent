@@ -34,6 +34,11 @@ class FakeDataEngineer:
         }
 
 
+# ============================================================
+# HEALTH
+# ============================================================
+
+
 def test_health_endpoint():
     client = TestClient(
         api.app
@@ -51,6 +56,187 @@ def test_health_endpoint():
     assert response.json() == {
         "status": "ok"
     }
+
+
+def test_health_is_independent_of_readiness(
+    monkeypatch,
+):
+    """
+    Liveness must remain healthy even when
+    dependencies are unavailable.
+    """
+
+    def fail_storage():
+        raise RuntimeError(
+            "Storage unavailable."
+        )
+
+    def fail_database():
+        raise RuntimeError(
+            "Database unavailable."
+        )
+
+    monkeypatch.setattr(
+        api,
+        "_check_runtime_storage_ready",
+        fail_storage,
+    )
+
+    monkeypatch.setattr(
+        api,
+        "_check_database_ready",
+        fail_database,
+    )
+
+    client = TestClient(
+        api.app
+    )
+
+    response = client.get(
+        "/health"
+    )
+
+    assert (
+        response.status_code
+        == 200
+    )
+
+    assert response.json() == {
+        "status": "ok"
+    }
+
+
+# ============================================================
+# READINESS
+# ============================================================
+
+
+def test_ready_endpoint(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        api,
+        "_check_runtime_storage_ready",
+        lambda: None,
+    )
+
+    monkeypatch.setattr(
+        api,
+        "_check_database_ready",
+        lambda: None,
+    )
+
+    client = TestClient(
+        api.app
+    )
+
+    response = client.get(
+        "/ready"
+    )
+
+    assert (
+        response.status_code
+        == 200
+    )
+
+    assert response.json() == {
+        "status": "ready"
+    }
+
+
+def test_ready_returns_503_when_storage_unavailable(
+    monkeypatch,
+):
+    def fail_storage():
+        raise RuntimeError(
+            "Storage unavailable."
+        )
+
+    monkeypatch.setattr(
+        api,
+        "_check_runtime_storage_ready",
+        fail_storage,
+    )
+
+    monkeypatch.setattr(
+        api,
+        "_check_database_ready",
+        lambda: None,
+    )
+
+    client = TestClient(
+        api.app
+    )
+
+    response = client.get(
+        "/ready"
+    )
+
+    assert (
+        response.status_code
+        == 503
+    )
+
+    assert response.json() == {
+        "detail": (
+            "Service is not ready."
+        )
+    }
+
+
+def test_ready_returns_503_when_database_unavailable(
+    monkeypatch,
+):
+    def fail_database():
+        raise RuntimeError(
+            "DB_PASSWORD=super-secret"
+        )
+
+    monkeypatch.setattr(
+        api,
+        "_check_runtime_storage_ready",
+        lambda: None,
+    )
+
+    monkeypatch.setattr(
+        api,
+        "_check_database_ready",
+        fail_database,
+    )
+
+    client = TestClient(
+        api.app
+    )
+
+    response = client.get(
+        "/ready"
+    )
+
+    assert (
+        response.status_code
+        == 503
+    )
+
+    assert response.json() == {
+        "detail": (
+            "Service is not ready."
+        )
+    }
+
+    assert (
+        "super-secret"
+        not in response.text
+    )
+
+    assert (
+        "DB_PASSWORD"
+        not in response.text
+    )
+
+
+# ============================================================
+# QUERY
+# ============================================================
 
 
 def test_query_endpoint_invokes_data_engineer(
