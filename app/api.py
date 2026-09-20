@@ -381,50 +381,61 @@ def query(
     """
     Execute one governed Data Engineer request.
 
-    The API accepts only the natural-language
-    request. All physical execution boundaries
-    remain application-controlled.
+    The current runtime intentionally allows only
+    one agent execution at a time because local
+    checkpoints, generated dbt files, lineage,
+    observability, and process-local locks are not
+    yet designed for concurrent runs.
+
+    If the execution slot is already occupied, the
+    request fails immediately instead of waiting in
+    an unbounded in-process queue.
     """
+
+    acquired = (
+        _AGENT_EXECUTION_LOCK.acquire(
+            blocking=False
+        )
+    )
+
+    if not acquired:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Agent service is busy."
+            ),
+            headers={
+                "Retry-After": "5",
+            },
+        )
 
     try:
 
-        with _AGENT_EXECUTION_LOCK:
+        data_engineer = (
+            _get_data_engineer()
+        )
 
-            data_engineer = (
-                _get_data_engineer()
-            )
-
-            result = (
-                data_engineer.invoke(
-                    {
-                        "messages": [
-                            HumanMessage(
-                                content=(
-                                    request.message
-                                )
+        result = (
+            data_engineer.invoke(
+                {
+                    "messages": [
+                        HumanMessage(
+                            content=(
+                                request.message
                             )
-                        ]
-                    }
-                )
+                        )
+                    ]
+                }
             )
+        )
 
-            response = (
-                _extract_final_response(
-                    result
-                )
+        response = (
+            _extract_final_response(
+                result
             )
+        )
 
     except Exception:
-
-        # Do not expose raw:
-        #
-        # - database errors
-        # - credentials
-        # - LLM provider errors
-        # - filesystem paths
-        # - internal stack traces
-        #
-        # through the HTTP boundary.
 
         raise HTTPException(
             status_code=500,
@@ -432,6 +443,10 @@ def query(
                 "Agent request failed."
             ),
         ) from None
+
+    finally:
+
+        _AGENT_EXECUTION_LOCK.release()
 
     return AgentResponse(
         response=response

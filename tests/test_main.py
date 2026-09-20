@@ -361,3 +361,175 @@ def test_query_does_not_expose_internal_errors(
         "super-secret"
         not in response.text
     )
+
+
+def test_query_returns_503_when_agent_is_busy(
+    monkeypatch,
+):
+    fake_agent = (
+        FakeDataEngineer()
+    )
+
+    monkeypatch.setattr(
+        api,
+        "_get_data_engineer",
+        lambda: fake_agent,
+    )
+
+    acquired = (
+        api._AGENT_EXECUTION_LOCK.acquire(
+            blocking=False
+        )
+    )
+
+    assert acquired is True
+
+    try:
+
+        client = TestClient(
+            api.app
+        )
+
+        response = client.post(
+            "/query",
+            json={
+                "message": (
+                    "Build an orders pipeline."
+                )
+            },
+        )
+
+        assert (
+            response.status_code
+            == 503
+        )
+
+        assert response.json() == {
+            "detail": (
+                "Agent service is busy."
+            )
+        }
+
+        assert (
+            response.headers[
+                "Retry-After"
+            ]
+            == "5"
+        )
+
+        assert (
+            len(
+                fake_agent.calls
+            )
+            == 0
+        )
+
+    finally:
+
+        api._AGENT_EXECUTION_LOCK.release()
+
+
+def test_query_releases_lock_after_success(
+    monkeypatch,
+):
+    fake_agent = (
+        FakeDataEngineer()
+    )
+
+    monkeypatch.setattr(
+        api,
+        "_get_data_engineer",
+        lambda: fake_agent,
+    )
+
+    client = TestClient(
+        api.app
+    )
+
+    first_response = client.post(
+        "/query",
+        json={
+            "message": "First request."
+        },
+    )
+
+    second_response = client.post(
+        "/query",
+        json={
+            "message": "Second request."
+        },
+    )
+
+    assert (
+        first_response.status_code
+        == 200
+    )
+
+    assert (
+        second_response.status_code
+        == 200
+    )
+
+    assert (
+        len(
+            fake_agent.calls
+        )
+        == 2
+    )
+
+
+def test_query_releases_lock_after_failure(
+    monkeypatch,
+):
+    class FailingAgent:
+        def invoke(
+            self,
+            payload,
+        ):
+            raise RuntimeError(
+                "Internal failure."
+            )
+
+    monkeypatch.setattr(
+        api,
+        "_get_data_engineer",
+        lambda: FailingAgent(),
+    )
+
+    client = TestClient(
+        api.app
+    )
+
+    failed_response = client.post(
+        "/query",
+        json={
+            "message": "Fail."
+        },
+    )
+
+    assert (
+        failed_response.status_code
+        == 500
+    )
+
+    fake_agent = (
+        FakeDataEngineer()
+    )
+
+    monkeypatch.setattr(
+        api,
+        "_get_data_engineer",
+        lambda: fake_agent,
+    )
+
+    successful_response = client.post(
+        "/query",
+        json={
+            "message": "Try again."
+        },
+    )
+
+    assert (
+        successful_response.status_code
+        == 200
+    )
