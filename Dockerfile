@@ -75,7 +75,7 @@ COPY app ./app
 COPY config ./config
 COPY models ./models
 COPY utils ./utils
-COPY dbt ./dbt
+COPY dbt ./dbt_seed
 COPY scripts/container_entrypoint.py \
     ./scripts/container_entrypoint.py
 
@@ -100,40 +100,21 @@ RUN uv sync \
 ENV PERSIST_ROOT=/app/runtime
 
 
-RUN rm -rf \
-        /app/data \
-        /app/dbt/generated_metadata \
-        /app/dbt/models/sources \
-        /app/dbt/models/staging/generated \
-        /app/dbt/models/marts/generated \
-    && mkdir -p \
+RUN mkdir -p \
         /app/runtime/data \
         /app/runtime/dbt/generated_metadata \
         /app/runtime/dbt/models/sources \
         /app/runtime/dbt/models/staging/generated \
         /app/runtime/dbt/models/marts/generated \
-        /app/dbt/target \
-        /app/dbt/logs \
     && ln -s \
         /app/runtime/data \
         /app/data \
     && ln -s \
-        /app/runtime/dbt/generated_metadata \
-        /app/dbt/generated_metadata \
-    && ln -s \
-        /app/runtime/dbt/models/sources \
-        /app/dbt/models/sources \
-    && ln -s \
-        /app/runtime/dbt/models/staging/generated \
-        /app/dbt/models/staging/generated \
-    && ln -s \
-        /app/runtime/dbt/models/marts/generated \
-        /app/dbt/models/marts/generated \
+        /app/runtime/dbt \
+        /app/dbt \
     && chown -R \
         appuser:appuser \
-        /app/runtime \
-        /app/dbt/target \
-        /app/dbt/logs
+        /app/runtime
 
 # ============================================================
 # NON-ROOT EXECUTION

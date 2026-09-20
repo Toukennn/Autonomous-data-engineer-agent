@@ -1300,7 +1300,7 @@ Structured safe events are written to stdout alongside the runtime logs.
 
 # Container Persistence
 
-The app stores durable runtime state in one volume mounted at `/app/runtime`. Its existing `/app/data` and generated dbt paths are symlinks into that volume. Compose mounts the `agent_runtime` volume there.
+The app stores durable runtime state in one volume mounted at `/app/runtime`. Both `/app/data` and the entire `/app/dbt` project are symlinks into that volume. At startup, the entrypoint copies versioned dbt project files into the volume without removing generated models or metadata. Compose mounts the `agent_runtime` volume there.
 
 On Railway, mount the app volume at `/app/runtime` and set `RAILWAY_RUN_UID=0` on the service. Railway mounts volumes as root; the container entrypoint prepares the volume and then starts Uvicorn as UID/GID 10001. Keep `PERSIST_ROOT=/app/runtime` so it matches the image symlinks.
 

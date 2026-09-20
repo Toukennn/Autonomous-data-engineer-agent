@@ -1,4 +1,5 @@
 import os
+import shutil
 import sys
 
 from pathlib import Path
@@ -13,6 +14,8 @@ PERSIST_ROOT = Path(
         "/app/runtime",
     )
 )
+
+DBT_SEED_DIRECTORY = Path("/app/dbt_seed")
 
 
 RUNTIME_DIRECTORIES = (
@@ -62,6 +65,13 @@ def _prepare_runtime_storage() -> None:
             parents=True,
             exist_ok=True,
         )
+
+    # Seed versioned dbt files while preserving generated models.
+    shutil.copytree(
+        DBT_SEED_DIRECTORY,
+        PERSIST_ROOT / "dbt",
+        dirs_exist_ok=True,
+    )
 
     if os.geteuid() != 0:
         return
