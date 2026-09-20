@@ -374,6 +374,55 @@ def test_dbt_handled_failure_becomes_execution_error(
     )
 
 
+def test_dbt_unhandled_failure_records_safe_exception_type(
+    tmp_path,
+):
+    dbt_root = tmp_path / "dbt"
+    _create_model(
+        dbt_root=dbt_root,
+        layer=DataLayer.SILVER,
+        model_name="stg_orders",
+    )
+
+    class FakeRunner:
+        def invoke(self, args):
+            return SimpleNamespace(
+                success=False,
+                exception=RuntimeError(
+                    "DB_PASSWORD=should-not-leak"
+                ),
+            )
+
+    executor = DBTExecutor(
+        dbt_project_dir=dbt_root,
+        db_config=_db_config(),
+        target_schema="dbt_test",
+        threads=1,
+        runner_factory=FakeRunner,
+    )
+
+    with pytest.raises(
+        DBTExecutionError,
+    ) as exc_info:
+        executor.build_model(
+            layer=DataLayer.SILVER,
+            dataset_name="orders",
+            model_name="stg_orders",
+        )
+
+    assert (
+        exc_info.value.details["failure_kind"]
+        == "unhandled_error"
+    )
+    assert (
+        exc_info.value.details["exception_type"]
+        == "RuntimeError"
+    )
+    assert (
+        "should-not-leak"
+        not in str(exc_info.value.details)
+    )
+
 def test_dbt_environment_is_restored(
     tmp_path,
     monkeypatch,

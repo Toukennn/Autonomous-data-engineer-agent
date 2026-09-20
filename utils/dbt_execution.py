@@ -499,6 +499,14 @@ class DBTExecutor:
                         "failure_kind": (
                             failure_kind
                         ),
+                        "exception_type": (
+                            type(
+                                runner_result.exception
+                            ).__name__
+                            if runner_result.exception
+                            is not None
+                            else None
+                        ),
                     },
                 )
 
