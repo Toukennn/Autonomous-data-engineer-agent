@@ -1932,7 +1932,7 @@ LLM → governed catalog → SQLGlot AST + relation allowlist → read-only Post
 - ✅ safe table fallback for filters/aggregations/key mutation
 - ✅ incremental warehouse/dbt lineage
 - ✅ privacy-preserving incremental observability
-- ⏳ final real two-run PostgreSQL/dbt E2E validation
+- ✅ final real two-run PostgreSQL/dbt E2E validation
 
 ---
 
