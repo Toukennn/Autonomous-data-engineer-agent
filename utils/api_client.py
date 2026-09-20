@@ -812,6 +812,118 @@ class APIClient:
             "API exceeded the configured redirect limit."
         )
 
+    def discover_records_path(
+        self,
+        url: str,
+        *,
+        max_depth: int = 4,
+    ) -> str | None:
+        """
+        Inspect one public JSON response for a collection
+        of record objects using the normal API safeguards.
+
+        None selects a top-level list or a single object.
+        """
+        headers = self._build_headers(
+            use_auth=False
+        )
+        payload, _ = self._request_json(
+            url,
+            headers,
+        )
+
+        if isinstance(payload, list):
+            if not payload:
+                raise ExternalAPIError(
+                    "API returned an empty record collection."
+                )
+            if not all(
+                isinstance(record, dict)
+                for record in payload
+            ):
+                raise ExternalAPIError(
+                    "Top-level API records must be JSON objects."
+                )
+            return None
+
+        if not isinstance(payload, dict):
+            raise ExternalAPIError(
+                "API must return a JSON object or "
+                "a list of JSON objects."
+            )
+
+        candidates: list[str] = []
+
+        def walk(
+            value: Any,
+            path: str,
+            depth: int,
+        ) -> None:
+            if depth > max_depth:
+                return
+
+            if isinstance(value, list):
+                if value and all(
+                    isinstance(record, dict)
+                    for record in value
+                ):
+                    candidates.append(path)
+                return
+
+            if isinstance(value, dict):
+                for key, nested_value in value.items():
+                    nested_path = (
+                        f"{path}.{key}"
+                        if path
+                        else key
+                    )
+                    walk(
+                        nested_value,
+                        nested_path,
+                        depth + 1,
+                    )
+
+        walk(payload, "", 0)
+
+        # The extractor treats a plain JSON object as one record.
+        if not candidates:
+            return None
+
+        preferred_names = [
+            "results",
+            "data",
+            "items",
+            "records",
+            "rows",
+            "entries",
+        ]
+
+        def candidate_score(path: str) -> tuple[int, int, str]:
+            final_name = path.split(".")[-1].lower()
+            try:
+                priority = preferred_names.index(final_name)
+            except ValueError:
+                priority = len(preferred_names)
+            return (
+                priority,
+                path.count("."),
+                path,
+            )
+
+        candidates.sort(key=candidate_score)
+
+        if len(candidates) > 1:
+            first_score = candidate_score(candidates[0])[:2]
+            second_score = candidate_score(candidates[1])[:2]
+            if first_score == second_score:
+                raise ExternalAPIError(
+                    "API contains multiple possible "
+                    "record collections and cannot be "
+                    "resolved safely."
+                )
+
+        return candidates[0]
+
     # ============================================================
     # RECORD EXTRACTION
     # ============================================================

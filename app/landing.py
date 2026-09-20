@@ -50,9 +50,15 @@ main{padding:32px 0 70px}.shell{display:grid;gap:18px}.card{border:1px solid var
 </div>
 
 <div id="ingest-mode" class="mode">
-<div class="field"><label for="api-url"><b>Public JSON API URL</b></label><input id="api-url" type="url" placeholder="https://randomuser.me/api/?results=5"></div>
-<div class="field"><label for="gold-goal"><b>What should the Gold mart contain?</b></label><textarea id="gold-goal" placeholder="Keep gender, email and phone. Deduplicate on id and prepare the result for analytics."></textarea></div>
-<p class="hint">The demo keeps the UI intentionally small: one source URL and one natural-language Gold requirement. Top-level arrays and APIs with a top-level <code>results</code> collection are the safest demo shapes.</p>
+<div class="field">
+<label for="api-url"><b>Source API URL</b></label>
+<input id="api-url" type="url" placeholder="Paste a public JSON API endpoint">
+<p class="hint">Paste any supported public JSON GET endpoint. The service validates the destination and response before ingestion. Private or local network destinations, unsafe URLs, oversized responses, and non-JSON responses are rejected.</p>
+</div>
+<div class="field">
+<label for="gold-goal"><b>What analytics should the Gold mart provide?</b></label>
+<textarea id="gold-goal" placeholder="Example: daily revenue totals by country, deduplicated on order id, with date, country, order count and total revenue."></textarea>
+</div>
 </div>
 
 <div class="run-row"><button id="run" class="run" type="button">Run</button><span id="elapsed" class="elapsed">0.0s</span><span class="small">One governed run at a time.</span></div>

@@ -1149,3 +1149,106 @@ def test_incomplete_incremental_configuration_is_rejected(
             watermark_param="after_id",
             watermark_value=100,
         )
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        ([{"id": 1}, {"id": 2}], None),
+        ({"results": [{"id": 1}]}, "results"),
+        (
+            {"response": {"data": {"items": [{"id": 1}]}}},
+            "response.data.items",
+        ),
+        ({"id": 1, "name": "Ada"}, None),
+        (
+            {
+                "rows": [{"id": 2}],
+                "response": {"data": {"items": [{"id": 1}]}},
+            },
+            "response.data.items",
+        ),
+    ],
+)
+def test_discover_records_path_uses_public_unauthenticated_response(
+    api_client,
+    monkeypatch,
+    payload,
+    expected,
+):
+    api_client.auth_token = SecretStr("must-not-be-sent")
+    seen = []
+
+    def fake_request(url, headers):
+        seen.append((url, headers))
+        return payload, 100
+
+    monkeypatch.setattr(api_client, "_request_json", fake_request)
+
+    path = api_client.discover_records_path(
+        "https://example.com/data"
+    )
+
+    assert path == expected
+    assert seen[0][0] == "https://example.com/data"
+    assert "Authorization" not in seen[0][1]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [],
+        [1, 2],
+        "not records",
+        {"left": [{"id": 1}], "right": [{"id": 2}]},
+    ],
+)
+def test_discovery_rejects_invalid_or_ambiguous_collections(
+    api_client,
+    monkeypatch,
+    payload,
+):
+    monkeypatch.setattr(
+        api_client,
+        "_request_json",
+        lambda url, headers: (payload, 100),
+    )
+
+    with pytest.raises(ExternalAPIError):
+        api_client.discover_records_path(
+            "https://example.com/data"
+        )
+
+
+def test_discovery_respects_depth_limit(
+    api_client,
+    monkeypatch,
+):
+    payload = {"one": {"two": {"items": [{"id": 1}]}}}
+    monkeypatch.setattr(
+        api_client,
+        "_request_json",
+        lambda url, headers: (payload, 100),
+    )
+
+    assert api_client.discover_records_path(
+        "https://example.com/data"
+    ) == "one.two.items"
+    assert api_client.discover_records_path(
+        "https://example.com/data",
+        max_depth=2,
+    ) is None
+
+
+def test_discovery_rejects_private_destination_before_request(
+    api_client,
+    monkeypatch,
+):
+    def never_fetch(*args, **kwargs):
+        raise AssertionError("network request should not run")
+
+    monkeypatch.setattr(api_client.session, "get", never_fetch)
+
+    with pytest.raises(ExternalAPIError, match="Localhost|Private|local"):
+        api_client.discover_records_path(
+            "http://127.0.0.1/api"
+        )

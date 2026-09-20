@@ -153,3 +153,91 @@ def test_demo_routes_use_only_demo_key_and_are_registered(
     assert unavailable.json() == {
         "detail": "Demo authentication is not configured."
     }
+
+
+def test_demo_ingest_passes_discovered_path_to_etl(
+    monkeypatch,
+    tmp_path,
+):
+    import sys
+    import threading
+    from types import ModuleType, SimpleNamespace
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app import demo_api
+    from utils.execution_observability import ExecutionRunStore
+
+    requested_urls = []
+    prompts = []
+
+    class FakeAPIClient:
+        def discover_records_path(self, url):
+            requested_urls.append(url)
+            return "response.data.items"
+
+    def invoke(payload):
+        prompts.append(payload["messages"][0].content)
+        ExecutionRunStore(tmp_path).complete_run(
+            run_id=payload["run_id"],
+            status="completed",
+        )
+        return {
+            "messages": [SimpleNamespace(content="Pipeline completed.")],
+            "workflow_failed": False,
+        }
+
+    class ImmediatePool:
+        def submit(self, operation, **kwargs):
+            operation(**kwargs)
+
+    fake_etl_module = ModuleType("agents.etl_analyst")
+    fake_etl_module.etl_analyst = SimpleNamespace(invoke=invoke)
+    monkeypatch.setitem(
+        sys.modules,
+        "agents.etl_analyst",
+        fake_etl_module,
+    )
+    monkeypatch.setattr(demo_api, "APIClient", FakeAPIClient)
+    monkeypatch.setattr(
+        demo_api,
+        "get_runtime_settings",
+        lambda: SimpleNamespace(
+            data_root=tmp_path,
+            dbt_target_schema="dbt_test",
+            etl_max_tool_calls=8,
+        ),
+    )
+
+    app = FastAPI()
+    app.include_router(
+        demo_api.create_demo_router(
+            require_demo_api_key=lambda: None,
+            execution_lock=threading.Lock(),
+            execution_pool=ImmediatePool(),
+        )
+    )
+
+    client = TestClient(app)
+    response = client.post(
+        "/demo/ingest",
+        json={
+            "api_url": "https://example.com/data",
+            "gold_goal": "Count active users by country.",
+        },
+    )
+
+    assert response.status_code == 202
+    assert requested_urls == ["https://example.com/data"]
+    assert len(prompts) == 1
+    assert "'response.data.items'" in prompts[0]
+    assert "paginate=False" in prompts[0]
+    assert "use_auth=False" in prompts[0]
+    assert "Count active users by country." in prompts[0]
+
+    status = client.get(
+        f"/demo/runs/{response.json()['run_id']}"
+    )
+    assert status.status_code == 200
+    assert status.json()["status"] == "completed"

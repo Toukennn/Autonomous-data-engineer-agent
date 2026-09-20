@@ -18,3 +18,8 @@ def test_landing_page_is_public_and_human_friendly():
     assert "autonomous-de-demo-key" in response.text
     assert "sessionStorage" in response.text
     assert "localStorage" not in response.text
+    assert "Source API URL" in response.text
+    assert "Paste a public JSON API endpoint" in response.text
+    assert "What analytics should the Gold mart provide?" in response.text
+    assert "randomuser.me" not in response.text
+    assert "Top-level arrays and APIs" not in response.text

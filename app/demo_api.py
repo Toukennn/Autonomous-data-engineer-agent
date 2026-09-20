@@ -11,6 +11,7 @@ from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field, field_validator
 
 from config.settings import get_runtime_settings
+from utils.api_client import APIClient
 from utils.database import DatabaseUtil, load_database_config
 from utils.execution_observability import ExecutionRunStore
 
@@ -349,30 +350,55 @@ def create_demo_router(
         try:
             from agents.etl_analyst import etl_analyst
 
+            api_client = APIClient()
+            records_path = api_client.discover_records_path(
+                api_url
+            )
+
             prompt = f"""
 Build a warehouse-backed PostgreSQL + dbt pipeline.
 
 Source API:
 {api_url}
 
-Use this exact logical dataset name for Bronze, Silver, and Gold:
+A deterministic API inspection has already identified
+the record collection.
+
+Use this exact records_path when calling
+extract_load_tool:
+
+{repr(records_path)}
+
+Use this exact logical dataset name for Bronze,
+Silver, and Gold:
+
 {dataset_name}
 
-The user wants the Gold mart to contain:
+The user wants the Gold mart to provide these
+analytics:
+
 {gold_goal}
 
 Requirements:
-- Extract the public JSON API into Bronze.
+- Extract the supplied API into Bronze.
+- Use records_path exactly as provided above.
+- Do not invent another records path.
+- Use paginate=False and use_auth=False for this demo ingestion.
 - Use the warehouse-backed dbt path.
 - Build Silver from Bronze with dbt.
 - Build Gold from Silver with dbt.
-- Keep the logical dataset name exactly {dataset_name}.
+- Keep the logical dataset name exactly:
+  {dataset_name}
+- Interpret the Gold requirement as the desired
+  analytics-ready business output.
+- Only use columns actually present in the source.
+- Do not invent columns.
 - Do not bypass Silver.
-- Do not invent quality requirements the user did not request.
-- Use deterministic tools for all physical execution.
-- Top-level JSON arrays are valid record collections.
-- A top-level "results" list is also a valid record collection.
-- If the API shape cannot be handled safely, fail instead of guessing.
+- Do not invent quality requirements.
+- Use deterministic tools for physical execution.
+- If the requested analytics cannot be produced
+  from the source data, explain that clearly rather
+  than inventing data.
 """.strip()
 
             state = etl_analyst.invoke(
