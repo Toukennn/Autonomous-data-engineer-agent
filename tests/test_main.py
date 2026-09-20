@@ -7,7 +7,7 @@ from langchain_core.messages import (
 )
 
 from app import api
-
+import threading
 
 class FakeDataEngineer:
     def __init__(
@@ -531,5 +531,158 @@ def test_query_releases_lock_after_failure(
 
     assert (
         successful_response.status_code
+        == 200
+    )
+
+
+def test_query_times_out_but_keeps_execution_busy(
+    monkeypatch,
+):
+    release_execution = (
+        threading.Event()
+    )
+
+    execution_started = (
+        threading.Event()
+    )
+
+    class SlowAgent:
+        def invoke(
+            self,
+            payload,
+        ):
+            execution_started.set()
+
+            release_execution.wait(
+                timeout=5
+            )
+
+            return {
+                "messages": [
+                    AIMessage(
+                        content=(
+                            "Slow pipeline completed."
+                        )
+                    )
+                ]
+            }
+
+    class FakeRuntimeSettings:
+        agent_request_timeout_seconds = (
+            0.01
+        )
+
+    monkeypatch.setattr(
+        api,
+        "_get_data_engineer",
+        lambda: SlowAgent(),
+    )
+
+    monkeypatch.setattr(
+        api,
+        "get_runtime_settings",
+        lambda: FakeRuntimeSettings(),
+    )
+
+    client = TestClient(
+        api.app
+    )
+
+    response = client.post(
+        "/query",
+        json={
+            "message": (
+                "Run a slow pipeline."
+            )
+        },
+    )
+
+    assert (
+        execution_started.wait(
+            timeout=1
+        )
+        is True
+    )
+
+    assert (
+        response.status_code
+        == 504
+    )
+
+    assert response.json() == {
+        "detail": (
+            "Agent request timed out."
+        )
+    }
+
+    # --------------------------------------------------------
+    # The timed-out execution is still running.
+    #
+    # A new request must therefore NOT be allowed
+    # to start.
+    # --------------------------------------------------------
+
+    busy_response = client.post(
+        "/query",
+        json={
+            "message": (
+                "Start another pipeline."
+            )
+        },
+    )
+
+    assert (
+        busy_response.status_code
+        == 503
+    )
+
+    assert busy_response.json() == {
+        "detail": (
+            "Agent service is busy."
+        )
+    }
+
+    # --------------------------------------------------------
+    # Allow the original execution to finish.
+    # --------------------------------------------------------
+
+    release_execution.set()
+
+    # Queue a marker behind the original worker.
+    #
+    # When this completes, we know that the slow
+    # execution has completely left the dedicated
+    # worker and released its execution lock.
+    api._AGENT_EXECUTION_POOL.submit(
+        lambda: None
+    ).result(
+        timeout=2
+    )
+
+    # --------------------------------------------------------
+    # Service should now accept another request.
+    # --------------------------------------------------------
+
+    fake_agent = (
+        FakeDataEngineer()
+    )
+
+    monkeypatch.setattr(
+        api,
+        "_get_data_engineer",
+        lambda: fake_agent,
+    )
+
+    final_response = client.post(
+        "/query",
+        json={
+            "message": (
+                "Try again."
+            )
+        },
+    )
+
+    assert (
+        final_response.status_code
         == 200
     )

@@ -1,6 +1,11 @@
 import os
 import threading
 
+from concurrent.futures import (
+    ThreadPoolExecutor,
+    wait,
+)
+
 from fastapi import (
     FastAPI,
     HTTPException,
@@ -62,6 +67,15 @@ app = FastAPI(
 
 _AGENT_EXECUTION_LOCK = (
     threading.Lock()
+)
+
+_AGENT_EXECUTION_POOL = (
+    ThreadPoolExecutor(
+        max_workers=1,
+        thread_name_prefix=(
+            "agent-execution"
+        ),
+    )
 )
 
 
@@ -210,6 +224,49 @@ def _extract_final_response(
         )
 
     return content
+
+
+def _execute_agent_request(
+    message: str,
+) -> str:
+    """
+    Execute one agent request inside the dedicated
+    execution worker.
+
+    The execution lock is released only when the
+    underlying agent execution has actually ended.
+
+    This is important because an HTTP timeout does
+    not safely terminate a Python worker thread.
+    """
+
+    try:
+
+        data_engineer = (
+            _get_data_engineer()
+        )
+
+        result = (
+            data_engineer.invoke(
+                {
+                    "messages": [
+                        HumanMessage(
+                            content=message
+                        )
+                    ]
+                }
+            )
+        )
+
+        return (
+            _extract_final_response(
+                result
+            )
+        )
+
+    finally:
+
+        _AGENT_EXECUTION_LOCK.release()
 
 
 # ============================================================
@@ -381,15 +438,13 @@ def query(
     """
     Execute one governed Data Engineer request.
 
-    The current runtime intentionally allows only
-    one agent execution at a time because local
-    checkpoints, generated dbt files, lineage,
-    observability, and process-local locks are not
-    yet designed for concurrent runs.
+    Only one agent execution may run at a time.
 
-    If the execution slot is already occupied, the
-    request fails immediately instead of waiting in
-    an unbounded in-process queue.
+    The HTTP request has a bounded wait time.
+    If that deadline is exceeded, the client
+    receives 504 while the execution slot remains
+    unavailable until the underlying worker
+    actually terminates.
     """
 
     acquired = (
@@ -411,28 +466,62 @@ def query(
 
     try:
 
-        data_engineer = (
-            _get_data_engineer()
-        )
-
-        result = (
-            data_engineer.invoke(
-                {
-                    "messages": [
-                        HumanMessage(
-                            content=(
-                                request.message
-                            )
-                        )
-                    ]
-                }
+        future = (
+            _AGENT_EXECUTION_POOL.submit(
+                _execute_agent_request,
+                request.message,
             )
         )
+
+    except Exception:
+
+        # Submission failed before the worker
+        # became responsible for releasing
+        # the execution lock.
+
+        _AGENT_EXECUTION_LOCK.release()
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Agent request failed."
+            ),
+        ) from None
+
+    timeout_seconds = (
+        get_runtime_settings()
+        .agent_request_timeout_seconds
+    )
+
+    completed, _ = wait(
+        {future},
+        timeout=timeout_seconds,
+    )
+
+    if not completed:
+
+        # Important:
+        #
+        # Do NOT release the execution lock here.
+        #
+        # Python threads cannot be safely terminated.
+        # The worker may still be modifying durable
+        # application state.
+        #
+        # _execute_agent_request() releases the lock
+        # only after the real execution ends.
+
+        raise HTTPException(
+            status_code=504,
+            detail=(
+                "Agent request timed out."
+            ),
+        )
+
+    try:
 
         response = (
-            _extract_final_response(
-                result
-            )
+            future.result()
         )
 
     except Exception:
@@ -443,10 +532,6 @@ def query(
                 "Agent request failed."
             ),
         ) from None
-
-    finally:
-
-        _AGENT_EXECUTION_LOCK.release()
 
     return AgentResponse(
         response=response

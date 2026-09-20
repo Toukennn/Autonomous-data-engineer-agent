@@ -35,6 +35,10 @@ def test_runtime_default_values():
         == 20_000_000
     )
 
+    assert (
+        settings.agent_request_timeout_seconds
+        == 600
+    )
 
 def test_database_settings_from_environment(
     monkeypatch,

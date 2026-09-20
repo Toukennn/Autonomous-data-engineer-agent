@@ -222,6 +222,15 @@ class RuntimeSettings(_BaseAppSettings):
         le=50,
     )
 
+    agent_request_timeout_seconds: float = Field(
+        default=600.0,
+        validation_alias=(
+            "AGENT_REQUEST_TIMEOUT_SECONDS"
+        ),
+        gt=0,
+        le=3600,
+    )
+
     dbt_target_schema: str = Field(
         default="dbt_dev",
         validation_alias=(
