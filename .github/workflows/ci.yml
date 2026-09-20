@@ -222,7 +222,7 @@ jobs:
       # CONTAINER CONFIGURATION
       # --------------------------------------------------------
 
-      - name: Verify DATA_ROOT
+      - name: Verify resolved DATA_ROOT
         run: |
           data_root="$(
             docker exec \
@@ -233,7 +233,7 @@ jobs:
 
           echo "DATA_ROOT: $data_root"
 
-          test "$data_root" = "/app/data"
+          test "$data_root" = "/app/runtime/data"
 
 
       # --------------------------------------------------------
