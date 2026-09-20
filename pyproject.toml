@@ -1,6 +1,6 @@
 [project]
 name = "data-engineer-agent"
-version = "0.1.0"
+version = "1.0.0"
 description = "A safety-oriented agentic data engineering system for ETL workflows and natural-language SQL analytics."
 readme = "README.md"
 authors = [

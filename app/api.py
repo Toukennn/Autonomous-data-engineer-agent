@@ -61,7 +61,7 @@ app = FastAPI(
         "Governed agentic data engineering "
         "and warehouse analytics API."
     ),
-    version="0.1.0",
+    version="1.0.0",
 )
 
 @app.middleware(
