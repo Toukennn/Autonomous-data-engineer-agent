@@ -9,14 +9,22 @@ on:
     branches:
       - main
 
+
 permissions:
   contents: read
+
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+
 jobs:
+
+  # ==========================================================
+  # PYTHON QUALITY GATE
+  # ==========================================================
+
   quality:
     name: Tests, Lint, Build
 
@@ -27,19 +35,28 @@ jobs:
     env:
       # Dummy values only.
       #
-      # Some agent modules construct LLM clients at import time.
-      # The deterministic tests replace those clients before any
-      # external LLM request occurs.
+      # Deterministic tests replace LLM clients before
+      # external requests occur.
       #
-      # Do NOT put real API credentials in this workflow.
+      # Never put real API credentials here.
       ANTHROPIC_API_KEY: sk-ant-test
       OPENAI_API_KEY: sk-test
 
       ETL_MAX_TOOL_CALLS: "8"
 
     steps:
+
+      # --------------------------------------------------------
+      # SOURCE
+      # --------------------------------------------------------
+
       - name: Checkout repository
         uses: actions/checkout@v7
+
+
+      # --------------------------------------------------------
+      # PYTHON / UV
+      # --------------------------------------------------------
 
       - name: Install uv
         uses: astral-sh/setup-uv@v10.1.0
@@ -51,7 +68,12 @@ jobs:
         run: uv python install 3.12
 
       - name: Install dependencies
-        run: uv sync --locked
+        run: uv sync --locked --python 3.12
+
+
+      # --------------------------------------------------------
+      # QUALITY CHECKS
+      # --------------------------------------------------------
 
       - name: Run Ruff
         run: uv run ruff check .
@@ -59,5 +81,181 @@ jobs:
       - name: Run tests
         run: uv run pytest -v
 
+
+      # --------------------------------------------------------
+      # PACKAGE BUILD
+      # --------------------------------------------------------
+
       - name: Build package
         run: uv build
+
+
+  # ==========================================================
+  # DOCKER IMAGE GATE
+  # ==========================================================
+
+  container:
+    name: Docker Build and Smoke Test
+
+    needs:
+      - quality
+
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 20
+
+    steps:
+
+      # --------------------------------------------------------
+      # SOURCE
+      # --------------------------------------------------------
+
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+
+      # --------------------------------------------------------
+      # BUILD PRODUCTION IMAGE
+      # --------------------------------------------------------
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            --tag autonomous-data-engineer-agent:ci \
+            .
+
+
+      # --------------------------------------------------------
+      # BOOT THE IMAGE
+      # --------------------------------------------------------
+      #
+      # No database or LLM credentials are intentionally
+      # supplied.
+      #
+      # /health must work independently because agent loading
+      # is lazy.
+      # --------------------------------------------------------
+
+      - name: Start container
+        run: |
+          docker run \
+            --detach \
+            --name autonomous-data-engineer-agent-ci \
+            --publish 8000:8000 \
+            autonomous-data-engineer-agent:ci
+
+
+      # --------------------------------------------------------
+      # WAIT FOR DOCKER HEALTH
+      # --------------------------------------------------------
+
+      - name: Wait for healthy container
+        run: |
+          for attempt in {1..30}; do
+
+            status="$(
+              docker inspect \
+                --format='{{.State.Health.Status}}' \
+                autonomous-data-engineer-agent-ci \
+                2>/dev/null \
+                || true
+            )"
+
+            echo "Container health: ${status:-unknown}"
+
+            if [ "$status" = "healthy" ]; then
+              exit 0
+            fi
+
+            if [ "$status" = "unhealthy" ]; then
+              echo "Container became unhealthy."
+              docker logs autonomous-data-engineer-agent-ci || true
+              exit 1
+            fi
+
+            sleep 2
+
+          done
+
+          echo "Container did not become healthy in time."
+          docker logs autonomous-data-engineer-agent-ci || true
+          exit 1
+
+
+      # --------------------------------------------------------
+      # HTTP BOUNDARY
+      # --------------------------------------------------------
+
+      - name: Verify health endpoint
+        run: |
+          response="$(
+            curl \
+              --fail \
+              --silent \
+              http://127.0.0.1:8000/health
+          )"
+
+          echo "$response"
+
+          echo "$response" \
+            | grep -q '"status":"ok"'
+
+
+      # --------------------------------------------------------
+      # SECURITY: NON-ROOT
+      # --------------------------------------------------------
+
+      - name: Verify non-root runtime
+        run: |
+          runtime_uid="$(
+            docker exec \
+              autonomous-data-engineer-agent-ci \
+              id -u
+          )"
+
+          echo "Runtime UID: $runtime_uid"
+
+          test "$runtime_uid" = "10001"
+
+
+      # --------------------------------------------------------
+      # CONTAINER CONFIGURATION
+      # --------------------------------------------------------
+
+      - name: Verify DATA_ROOT
+        run: |
+          data_root="$(
+            docker exec \
+              autonomous-data-engineer-agent-ci \
+              python -c \
+              "from config.settings import get_runtime_settings; print(get_runtime_settings().data_root)"
+          )"
+
+          echo "DATA_ROOT: $data_root"
+
+          test "$data_root" = "/app/data"
+
+
+      # --------------------------------------------------------
+      # DEBUGGING
+      # --------------------------------------------------------
+
+      - name: Show container logs on failure
+        if: failure()
+        run: |
+          docker logs \
+            autonomous-data-engineer-agent-ci \
+            || true
+
+
+      # --------------------------------------------------------
+      # CLEANUP
+      # --------------------------------------------------------
+
+      - name: Remove test container
+        if: always()
+        run: |
+          docker rm \
+            --force \
+            autonomous-data-engineer-agent-ci \
+            || true
