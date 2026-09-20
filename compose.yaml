@@ -1,0 +1,123 @@
+services:
+
+  # ==========================================================
+  # POSTGRESQL
+  # ==========================================================
+
+  postgres:
+    image: postgres:17-alpine
+
+    container_name: autonomous-data-engineer-postgres
+
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+    networks:
+      - data_engineer_network
+
+
+  # ==========================================================
+  # AUTONOMOUS DATA ENGINEER
+  # ==========================================================
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    image: autonomous-data-engineer-agent:local
+
+    container_name: autonomous-data-engineer-agent
+
+    restart: unless-stopped
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    # Load your existing application configuration.
+    #
+    # Secrets remain runtime environment variables and are
+    # never baked into the Docker image.
+    env_file:
+      - .env
+
+    # Docker-specific overrides.
+    #
+    # "localhost" inside this container would mean the app
+    # container itself, therefore PostgreSQL is addressed by
+    # its Compose service name.
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DATA_ROOT: /app/data
+
+    ports:
+      - "8000:8000"
+
+    volumes:
+
+      # --------------------------------------------------------
+      # DURABLE APPLICATION STATE
+      # --------------------------------------------------------
+
+      - agent_data:/app/data
+
+      # --------------------------------------------------------
+      # DURABLE GENERATED DBT STATE
+      # --------------------------------------------------------
+
+      - dbt_generated_metadata:/app/dbt/generated_metadata
+      - dbt_sources:/app/dbt/models/sources
+      - dbt_staging_generated:/app/dbt/models/staging/generated
+      - dbt_marts_generated:/app/dbt/models/marts/generated
+
+    networks:
+      - data_engineer_network
+
+
+# ============================================================
+# NAMED VOLUMES
+# ============================================================
+
+volumes:
+
+  postgres_data:
+
+  agent_data:
+
+  dbt_generated_metadata:
+
+  dbt_sources:
+
+  dbt_staging_generated:
+
+  dbt_marts_generated:
+
+
+# ============================================================
+# PRIVATE APPLICATION NETWORK
+# ============================================================
+
+networks:
+
+  data_engineer_network:
+    driver: bridge
