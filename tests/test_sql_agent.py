@@ -441,6 +441,17 @@ def test_sql_success_observability_is_safe(
         ]
         is False
     )
+    assert execution_result["sql_result_columns"] == [
+        "customer_id",
+        "revenue",
+    ]
+    assert execution_result["sql_result_rows"] == [
+        [123, "VERY_SECRET_ROW_VALUE"],
+    ]
+    assert execution_result["sql_result_truncated"] is False
+    assert "VERY_SECRET_ROW_VALUE" in execution_result[
+        "sql_query_execution_result"
+    ]
 
     completion_state = (
         execution_state.model_copy(

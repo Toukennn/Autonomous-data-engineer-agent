@@ -10,5 +10,6 @@ def test_landing_page_is_public_and_human_friendly():
 
     assert response.status_code == 200
     assert "Autonomous Data Engineer Agent" in response.text
-    assert "Live governed query" in response.text
+    assert "Ask a question" in response.text
+    assert "Ingest an API" in response.text
     assert "X-API-Key" in response.text
