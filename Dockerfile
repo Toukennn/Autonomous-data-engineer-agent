@@ -76,6 +76,8 @@ COPY config ./config
 COPY models ./models
 COPY utils ./utils
 COPY dbt ./dbt
+COPY scripts/container_entrypoint.py \
+    ./scripts/container_entrypoint.py
 
 
 # ============================================================
@@ -88,32 +90,50 @@ RUN uv sync \
 
 
 # ============================================================
-# RUNTIME-WRITABLE DIRECTORIES
+# PERSISTENT RUNTIME ROOT
 # ============================================================
 #
-# Application Python source remains root-owned/read-only.
-#
-# Only stateful runtime locations are writable by appuser.
+# All durable filesystem state is routed through one runtime
+# root so cloud platforms only need one persistent volume.
 # ============================================================
 
-RUN mkdir -p \
+ENV PERSIST_ROOT=/app/runtime
+
+
+RUN rm -rf \
         /app/data \
         /app/dbt/generated_metadata \
-        /app/dbt/target \
-        /app/dbt/logs \
         /app/dbt/models/sources \
         /app/dbt/models/staging/generated \
         /app/dbt/models/marts/generated \
-    && chown -R \
-        appuser:appuser \
-        /app/data \
-        /app/dbt/generated_metadata \
+    && mkdir -p \
+        /app/runtime/data \
+        /app/runtime/dbt/generated_metadata \
+        /app/runtime/dbt/models/sources \
+        /app/runtime/dbt/models/staging/generated \
+        /app/runtime/dbt/models/marts/generated \
         /app/dbt/target \
         /app/dbt/logs \
+    && ln -s \
+        /app/runtime/data \
+        /app/data \
+    && ln -s \
+        /app/runtime/dbt/generated_metadata \
+        /app/dbt/generated_metadata \
+    && ln -s \
+        /app/runtime/dbt/models/sources \
         /app/dbt/models/sources \
+    && ln -s \
+        /app/runtime/dbt/models/staging/generated \
         /app/dbt/models/staging/generated \
-        /app/dbt/models/marts/generated
-
+    && ln -s \
+        /app/runtime/dbt/models/marts/generated \
+        /app/dbt/models/marts/generated \
+    && chown -R \
+        appuser:appuser \
+        /app/runtime \
+        /app/dbt/target \
+        /app/dbt/logs
 
 # ============================================================
 # NON-ROOT EXECUTION
@@ -161,5 +181,7 @@ HEALTHCHECK \
 # Multi-worker deployment comes only after those concurrency
 # boundaries are redesigned.
 # ============================================================
+
+ENTRYPOINT ["python", "/app/scripts/container_entrypoint.py"]
 
 CMD ["uvicorn", "app.api:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

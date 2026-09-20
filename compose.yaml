@@ -74,21 +74,7 @@ services:
       - "8000:8000"
 
     volumes:
-
-      # --------------------------------------------------------
-      # DURABLE APPLICATION STATE
-      # --------------------------------------------------------
-
-      - agent_data:/app/data
-
-      # --------------------------------------------------------
-      # DURABLE GENERATED DBT STATE
-      # --------------------------------------------------------
-
-      - dbt_generated_metadata:/app/dbt/generated_metadata
-      - dbt_sources:/app/dbt/models/sources
-      - dbt_staging_generated:/app/dbt/models/staging/generated
-      - dbt_marts_generated:/app/dbt/models/marts/generated
+      - agent_runtime:/app/runtime
 
     networks:
       - data_engineer_network
@@ -102,15 +88,7 @@ volumes:
 
   postgres_data:
 
-  agent_data:
-
-  dbt_generated_metadata:
-
-  dbt_sources:
-
-  dbt_staging_generated:
-
-  dbt_marts_generated:
+  agent_runtime:
 
 
 # ============================================================

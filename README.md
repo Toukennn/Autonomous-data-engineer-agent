@@ -1628,6 +1628,16 @@ uv run python inspect_warehouse.py
 
 ---
 
+# Container Persistence
+
+The app stores durable runtime state in one volume mounted at `/app/runtime`. Its existing `/app/data` and generated dbt paths are symlinks into that volume. Compose mounts the `agent_runtime` volume there.
+
+On Railway, mount the app volume at `/app/runtime` and set `RAILWAY_RUN_UID=0` on the service. Railway mounts volumes as root; the container entrypoint prepares the volume and then starts Uvicorn as UID/GID 10001. Keep `PERSIST_ROOT=/app/runtime` so it matches the image symlinks.
+
+The previous five Compose volumes are not copied into `agent_runtime` automatically. Migrate their contents before recreating the app container if you need existing ETL and dbt state. Keep the old volumes until the new runtime state is verified.
+
+---
+
 # Testing
 
 Coverage includes:
