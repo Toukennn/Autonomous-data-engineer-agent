@@ -1,6 +1,7 @@
 import os
 import threading
 import secrets
+from app.demo_api import create_demo_router
 from app.landing import landing_router
 from time import (
     perf_counter,
@@ -222,6 +223,20 @@ _AGENT_EXECUTION_POOL = (
         max_workers=1,
         thread_name_prefix=(
             "agent-execution"
+        ),
+    )
+)
+
+app.include_router(
+    create_demo_router(
+        require_service_api_key=(
+            _require_service_api_key
+        ),
+        execution_lock=(
+            _AGENT_EXECUTION_LOCK
+        ),
+        execution_pool=(
+            _AGENT_EXECUTION_POOL
         ),
     )
 )

@@ -615,6 +615,16 @@ def execute_sql(
         "sql_query_execution_result": str(
             result.as_dict()
         ),
+        "sql_result_columns": list(
+            result.columns
+        ),
+        "sql_result_rows": [
+            list(row)
+            for row in result.rows
+        ],
+        "sql_result_truncated": (
+            result.truncated
+        ),
         "sql_execution_failed": False,
     }
 

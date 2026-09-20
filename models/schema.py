@@ -34,6 +34,22 @@ class AgentSchema(BaseModel):
     generated_sql_query: str = ""
     comments: str = ""
     sql_query_execution_result: str = ""
+
+    # Structured SQL result used by the human-facing demo.
+    # The existing string representation remains available for
+    # the final-answer LLM prompt and backward compatibility.
+    sql_result_columns: list[str] = Field(
+        default_factory=list
+    )
+
+    sql_result_rows: list[
+        list[object]
+    ] = Field(
+        default_factory=list
+    )
+
+    sql_result_truncated: bool = False
+
     final_answer: str = ""
 
     run_id: str = ""
