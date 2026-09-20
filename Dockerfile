@@ -97,11 +97,13 @@ RUN uv sync \
 # root so cloud platforms only need one persistent volume.
 # ============================================================
 
-ENV PERSIST_ROOT=/app/runtime
+ENV PERSIST_ROOT=/app/runtime \
+    HOME=/app/runtime/home
 
 
 RUN mkdir -p \
         /app/runtime/data \
+        /app/runtime/home \
         /app/runtime/dbt/generated_metadata \
         /app/runtime/dbt/models/sources \
         /app/runtime/dbt/models/staging/generated \

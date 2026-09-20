@@ -20,6 +20,7 @@ DBT_SEED_DIRECTORY = Path("/app/dbt_seed")
 
 RUNTIME_DIRECTORIES = (
     PERSIST_ROOT / "data",
+    PERSIST_ROOT / "home",
     (
         PERSIST_ROOT
         / "dbt"
@@ -123,6 +124,10 @@ def _prepare_runtime_storage() -> None:
 
 def main() -> None:
     _prepare_runtime_storage()
+
+    os.environ["HOME"] = str(
+        PERSIST_ROOT / "home"
+    )
 
     if len(sys.argv) < 2:
         raise RuntimeError(
