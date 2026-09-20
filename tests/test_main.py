@@ -1,3 +1,7 @@
+from uuid import (
+    UUID,
+)
+
 from fastapi.testclient import (
     TestClient,
 )
@@ -66,6 +70,28 @@ def _authenticated_client():
     return client
 
 
+def _assert_uuid4_header(
+    response,
+    header_name: str,
+) -> str:
+    value = (
+        response.headers[
+            header_name
+        ]
+    )
+
+    parsed = UUID(
+        value
+    )
+
+    assert (
+        parsed.version
+        == 4
+    )
+
+    return value
+
+
 # ============================================================
 # HEALTH
 # ============================================================
@@ -88,6 +114,44 @@ def test_health_endpoint():
     assert response.json() == {
         "status": "ok"
     }
+
+    _assert_uuid4_header(
+        response,
+        "X-Request-ID",
+    )
+
+
+def test_request_ids_are_unique():
+    client = TestClient(
+        api.app
+    )
+
+    first = client.get(
+        "/health"
+    )
+
+    second = client.get(
+        "/health"
+    )
+
+    first_id = (
+        _assert_uuid4_header(
+            first,
+            "X-Request-ID",
+        )
+    )
+
+    second_id = (
+        _assert_uuid4_header(
+            second,
+            "X-Request-ID",
+        )
+    )
+
+    assert (
+        first_id
+        != second_id
+    )
 
 
 def test_health_is_independent_of_readiness(
@@ -309,6 +373,25 @@ def test_query_endpoint_invokes_data_engineer(
         )
     }
 
+    request_id = (
+        _assert_uuid4_header(
+            response,
+            "X-Request-ID",
+        )
+    )
+
+    run_id = (
+        _assert_uuid4_header(
+            response,
+            "X-Run-ID",
+        )
+    )
+
+    assert (
+        request_id
+        != run_id
+    )
+
     assert (
         len(
             fake_agent.calls
@@ -441,6 +524,16 @@ def test_query_returns_503_when_agent_is_busy(
                 "Agent service is busy."
             )
         }
+
+        _assert_uuid4_header(
+            response,
+            "X-Request-ID",
+        )
+
+        assert (
+            "X-Run-ID"
+            not in response.headers
+        )
 
         assert (
             response.headers[
@@ -646,6 +739,16 @@ def test_query_times_out_but_keeps_execution_busy(
             "Agent request timed out."
         )
     }
+
+    _assert_uuid4_header(
+        response,
+        "X-Request-ID",
+    )
+
+    _assert_uuid4_header(
+        response,
+        "X-Run-ID",
+    )
 
     # --------------------------------------------------------
     # The timed-out execution is still running.

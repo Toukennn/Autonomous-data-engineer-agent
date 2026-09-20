@@ -1,6 +1,7 @@
 import os
 import threading
 import secrets
+from uuid import uuid4
 
 from concurrent.futures import (
     ThreadPoolExecutor,
@@ -11,6 +12,8 @@ from fastapi import (
     Depends,
     FastAPI,
     HTTPException,
+    Request,
+    Response,
     Security,
 )
 
@@ -53,6 +56,37 @@ app = FastAPI(
     ),
     version="0.1.0",
 )
+
+@app.middleware(
+    "http"
+)
+async def add_request_id(
+    request: Request,
+    call_next,
+):
+    """
+    Assign one server-generated correlation ID
+    to every HTTP request.
+    """
+
+    request_id = (
+        uuid4().hex
+    )
+
+    request.state.request_id = (
+        request_id
+    )
+
+    response = await call_next(
+        request
+    )
+
+    response.headers[
+        "X-Request-ID"
+    ] = request_id
+
+    return response
+
 
 _SERVICE_API_KEY_HEADER = (
     APIKeyHeader(
@@ -504,6 +538,8 @@ def ready() -> ReadinessResponse:
 )
 def query(
     request: AgentRequest,
+    http_request: Request,
+    http_response: Response,
 ) -> AgentResponse:
     """
     Execute one governed Data Engineer request.
@@ -534,6 +570,20 @@ def query(
             },
         )
 
+    request_id = (
+        http_request
+        .state
+        .request_id
+    )
+
+    run_id = (
+        uuid4().hex
+    )
+
+    # request_id will be connected to structured
+    # execution logs in Phase 2L.6.
+    _ = request_id
+
     try:
 
         future = (
@@ -556,6 +606,9 @@ def query(
             detail=(
                 "Agent request failed."
             ),
+            headers={
+                "X-Run-ID": run_id,
+            },
         ) from None
 
     timeout_seconds = (
@@ -586,6 +639,9 @@ def query(
             detail=(
                 "Agent request timed out."
             ),
+            headers={
+                "X-Run-ID": run_id,
+            },
         )
 
     try:
@@ -601,7 +657,14 @@ def query(
             detail=(
                 "Agent request failed."
             ),
+            headers={
+                "X-Run-ID": run_id,
+            },
         ) from None
+
+    http_response.headers[
+        "X-Run-ID"
+    ] = run_id
 
     return AgentResponse(
         response=response
