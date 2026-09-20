@@ -1,0 +1,59 @@
+{
+  "slug": "missing-values",
+  "title": "Missing-value analysis",
+  "recorded": true,
+  "recorded_at": "2026-09-20T21:49:08.711280+00:00",
+  "question": "Count the missing values separately for Country, Segment, and Sales in dbt_dev_gold.mart_rec_sales_gold_28f6ea4c. Use the governed warehouse analytics path.",
+  "status": "completed",
+  "elapsed_ms": 3527,
+  "request_id": "967775a17e1b4152b1231d20eff9a7ec",
+  "run_id": "ba81df64-8478-4619-ab06-867a11493514",
+  "stages": [
+    {
+      "id": "generate",
+      "label": "Generate governed SQL",
+      "detail": "SQL generated.",
+      "status": "completed"
+    },
+    {
+      "id": "validate",
+      "label": "Validate SQL",
+      "detail": "SQL passed deterministic validation.",
+      "status": "completed"
+    },
+    {
+      "id": "execute",
+      "label": "Execute read-only query",
+      "detail": "Read-only execution completed.",
+      "status": "completed"
+    },
+    {
+      "id": "answer",
+      "label": "Format answer",
+      "detail": "Turning the bounded result into a concise answer.",
+      "status": "completed"
+    }
+  ],
+  "result": {
+    "generated_sql": "SELECT\n  COUNT(*) FILTER (WHERE \"Country\" IS NULL) AS country_missing_count,\n  COUNT(*) FILTER (WHERE \"Segment\" IS NULL) AS segment_missing_count,\n  COUNT(*) FILTER (WHERE \"Sales\" IS NULL) AS sales_missing_count\nFROM dbt_dev_gold.mart_rec_sales_gold_28f6ea4c;",
+    "answer": "Missing values:\n\n- **Country:** 0\n- **Segment:** 0\n- **Sales:** 0",
+    "columns": [
+      "country_missing_count",
+      "segment_missing_count",
+      "sales_missing_count"
+    ],
+    "rows": [
+      [
+        0,
+        0,
+        0
+      ]
+    ],
+    "truncated": false,
+    "referenced_relations": [
+      "dbt_dev_gold.mart_rec_sales_gold_28f6ea4c"
+    ]
+  },
+  "guardrail": null,
+  "source_url": "https://gist.github.com/CSalcedoDataBI/6110ffa345d3a1fb525c0d201ce95451"
+}

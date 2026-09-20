@@ -48,6 +48,10 @@ include = [
 ]
 
 
+[tool.setuptools.package-data]
+app = ["recorded_runs/*.json"]
+
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 

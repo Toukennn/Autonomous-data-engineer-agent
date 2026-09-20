@@ -1,0 +1,73 @@
+{
+  "slug": "revenue-by-country",
+  "title": "Top 5 countries by revenue",
+  "recorded": true,
+  "recorded_at": "2026-09-20T21:48:33.192513+00:00",
+  "question": "Show the top 5 countries by total revenue from dbt_dev_gold.mart_rec_sales_gold_28f6ea4c. The Sales column is the revenue measure. Sum Sales by Country, order descending, limit 5. Use the governed warehouse analytics path.",
+  "status": "completed",
+  "elapsed_ms": 3817,
+  "request_id": "0f5834f5eeb148a087e0bdc770b18132",
+  "run_id": "76e535c3-d17e-48c8-82d1-a0c155e8323a",
+  "stages": [
+    {
+      "id": "generate",
+      "label": "Generate governed SQL",
+      "detail": "SQL generated.",
+      "status": "completed"
+    },
+    {
+      "id": "validate",
+      "label": "Validate SQL",
+      "detail": "SQL passed deterministic validation.",
+      "status": "completed"
+    },
+    {
+      "id": "execute",
+      "label": "Execute read-only query",
+      "detail": "Read-only execution completed.",
+      "status": "completed"
+    },
+    {
+      "id": "answer",
+      "label": "Format answer",
+      "detail": "Turning the bounded result into a concise answer.",
+      "status": "completed"
+    }
+  ],
+  "result": {
+    "generated_sql": "SELECT\n  \"Country\",\n  SUM(\"Sales\") AS total_revenue\nFROM dbt_dev_gold.mart_rec_sales_gold_28f6ea4c\nGROUP BY \"Country\"\nORDER BY total_revenue DESC\nLIMIT 5;",
+    "answer": "Top 5 countries by total revenue:\n\n| Rank | Country | Total Revenue |\n|---:|---|---:|\n| 1 | United States of America | 1,026,166,935 |\n| 2 | Canada | 976,155,769 |\n| 3 | France | 897,584,019 |\n| 4 | Mexico | 879,000,062 |\n| 5 | Germany | 758,125,278 |",
+    "columns": [
+      "Country",
+      "total_revenue"
+    ],
+    "rows": [
+      [
+        "United States of America",
+        1026166935.0
+      ],
+      [
+        "Canada",
+        976155769.0
+      ],
+      [
+        "France",
+        897584019.0
+      ],
+      [
+        "Mexico",
+        879000062.0
+      ],
+      [
+        "Germany",
+        758125278.0
+      ]
+    ],
+    "truncated": false,
+    "referenced_relations": [
+      "dbt_dev_gold.mart_rec_sales_gold_28f6ea4c"
+    ]
+  },
+  "guardrail": null,
+  "source_url": "https://gist.github.com/CSalcedoDataBI/6110ffa345d3a1fb525c0d201ce95451"
+}

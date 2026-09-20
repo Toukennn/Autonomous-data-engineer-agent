@@ -1,0 +1,79 @@
+{
+  "slug": "gold-preview",
+  "title": "Preview a Gold mart",
+  "recorded": true,
+  "recorded_at": "2026-09-20T21:49:04.479891+00:00",
+  "question": "Show the first 5 rows with Country, Segment, and Sales from dbt_dev_gold.mart_rec_sales_gold_28f6ea4c. Use the governed warehouse analytics path.",
+  "status": "completed",
+  "elapsed_ms": 4253,
+  "request_id": "cd9393e6b8224894aec74bdfa1f854fa",
+  "run_id": "51215f68-588c-4465-9c8e-ddd258c1f016",
+  "stages": [
+    {
+      "id": "generate",
+      "label": "Generate governed SQL",
+      "detail": "SQL generated.",
+      "status": "completed"
+    },
+    {
+      "id": "validate",
+      "label": "Validate SQL",
+      "detail": "SQL passed deterministic validation.",
+      "status": "completed"
+    },
+    {
+      "id": "execute",
+      "label": "Execute read-only query",
+      "detail": "Read-only execution completed.",
+      "status": "completed"
+    },
+    {
+      "id": "answer",
+      "label": "Format answer",
+      "detail": "Turning the bounded result into a concise answer.",
+      "status": "completed"
+    }
+  ],
+  "result": {
+    "generated_sql": "SELECT \"Country\", \"Segment\", \"Sales\"\nFROM dbt_dev_gold.mart_rec_sales_gold_28f6ea4c\nLIMIT 5;",
+    "answer": "| Country | Segment | Sales |\n|---|---|---:|\n| Canada | Channel Partners | 19,752,468.0 |\n| Canada | Enterprise | 144,752,736.0 |\n| Canada | Government | 428,829,833.0 |\n| Canada | Midmarket | 21,616,940.0 |\n| Canada | Small Business | 361,203,792.0 |",
+    "columns": [
+      "Country",
+      "Segment",
+      "Sales"
+    ],
+    "rows": [
+      [
+        "Canada",
+        "Channel Partners",
+        19752468.0
+      ],
+      [
+        "Canada",
+        "Enterprise",
+        144752736.0
+      ],
+      [
+        "Canada",
+        "Government",
+        428829833.0
+      ],
+      [
+        "Canada",
+        "Midmarket",
+        21616940.0
+      ],
+      [
+        "Canada",
+        "Small Business",
+        361203792.0
+      ]
+    ],
+    "truncated": false,
+    "referenced_relations": [
+      "dbt_dev_gold.mart_rec_sales_gold_28f6ea4c"
+    ]
+  },
+  "guardrail": null,
+  "source_url": "https://gist.github.com/CSalcedoDataBI/6110ffa345d3a1fb525c0d201ce95451"
+}

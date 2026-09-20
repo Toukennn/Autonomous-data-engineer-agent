@@ -3,6 +3,7 @@ import threading
 import secrets
 from app.demo_api import create_demo_router
 from app.landing import landing_router
+from app.recorded_demo import recorded_demo_router
 from time import (
     perf_counter,
 )
@@ -69,6 +70,10 @@ app = FastAPI(
 
 app.include_router(
     landing_router
+)
+
+app.include_router(
+    recorded_demo_router
 )
 
 @app.middleware(
