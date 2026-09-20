@@ -1,6 +1,7 @@
 import os
 import threading
 import secrets
+from app.landing import landing_router
 from time import (
     perf_counter,
 )
@@ -64,9 +65,14 @@ app = FastAPI(
     version="1.0.0",
 )
 
+app.include_router(
+    landing_router
+)
+
 @app.middleware(
     "http"
 )
+
 async def add_request_id(
     request: Request,
     call_next,
@@ -629,6 +635,7 @@ def ready() -> ReadinessResponse:
         )
     ],
 )
+
 def query(
     request: AgentRequest,
     http_request: Request,
