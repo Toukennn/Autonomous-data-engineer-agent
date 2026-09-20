@@ -250,6 +250,48 @@ class RuntimeSettings(_BaseAppSettings):
         le=32,
     )
 
+
+class ServiceAPISettings(
+    _BaseAppSettings
+):
+    """
+    Authentication configuration for clients
+    calling this application's HTTP API.
+
+    This is intentionally separate from
+    RuntimeSettings.api_auth_token, which is used
+    for outbound authentication when ingesting
+    external APIs.
+    """
+
+    service_api_key: SecretStr = Field(
+        validation_alias=(
+            "SERVICE_API_KEY"
+        ),
+    )
+
+    @field_validator(
+        "service_api_key"
+    )
+    @classmethod
+    def validate_service_api_key(
+        cls,
+        value: SecretStr,
+    ) -> SecretStr:
+
+        secret = (
+            value.get_secret_value()
+        )
+
+        if len(secret) < 32:
+            raise ValueError(
+                "SERVICE_API_KEY must be at "
+                "least 32 characters."
+            )
+
+        return value
+    
+
 class LLMSettings(_BaseAppSettings):
     """
     LLM provider and model configuration.
@@ -295,6 +337,11 @@ def get_database_settings() -> DatabaseSettings:
 def get_runtime_settings() -> RuntimeSettings:
     return RuntimeSettings()
 
+@lru_cache
+def get_service_api_settings() -> (
+    ServiceAPISettings
+):
+    return ServiceAPISettings()
 
 @lru_cache
 def get_llm_settings() -> LLMSettings:

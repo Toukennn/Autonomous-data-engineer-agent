@@ -6,6 +6,10 @@ import urllib.request
 
 from uuid import uuid4
 
+from config.settings import (
+    get_service_api_settings,
+)
+
 
 BASE_URL = "http://127.0.0.1:8000"
 
@@ -36,6 +40,14 @@ def request_json(
         ] = "application/json"
 
         method = "POST"
+
+        headers[
+            "X-API-Key"
+        ] = (
+            get_service_api_settings()
+            .service_api_key
+            .get_secret_value()
+        )
 
     request = (
         urllib.request.Request(

@@ -6,6 +6,12 @@ from langchain_core.messages import (
     AIMessage,
 )
 
+import pytest
+
+from pydantic import (
+    SecretStr,
+)
+
 from app import api
 import threading
 
@@ -32,6 +38,32 @@ class FakeDataEngineer:
                 )
             ]
         }
+
+TEST_SERVICE_API_KEY = (
+    "test-service-api-key-0123456789abcdef"
+)
+
+
+class FakeServiceAPISettings:
+    service_api_key = SecretStr(
+        TEST_SERVICE_API_KEY
+    )
+
+
+def _authenticated_client():
+    client = TestClient(
+        api.app
+    )
+
+    client.headers.update(
+        {
+            "X-API-Key": (
+                TEST_SERVICE_API_KEY
+            )
+        }
+    )
+
+    return client
 
 
 # ============================================================
@@ -252,8 +284,8 @@ def test_query_endpoint_invokes_data_engineer(
         lambda: fake_agent,
     )
 
-    client = TestClient(
-        api.app
+    client = (
+        _authenticated_client()
     )
 
     response = client.post(
@@ -300,8 +332,8 @@ def test_query_endpoint_invokes_data_engineer(
 
 
 def test_query_rejects_blank_message():
-    client = TestClient(
-        api.app
+    client = (
+        _authenticated_client()
     )
 
     response = client.post(
@@ -335,8 +367,8 @@ def test_query_does_not_expose_internal_errors(
         lambda: FailingAgent(),
     )
 
-    client = TestClient(
-        api.app
+    client = (
+        _authenticated_client()
     )
 
     response = client.post(
@@ -386,8 +418,8 @@ def test_query_returns_503_when_agent_is_busy(
 
     try:
 
-        client = TestClient(
-            api.app
+        client = (
+            _authenticated_client()
         )
 
         response = client.post(
@@ -442,8 +474,8 @@ def test_query_releases_lock_after_success(
         lambda: fake_agent,
     )
 
-    client = TestClient(
-        api.app
+    client = (
+        _authenticated_client()
     )
 
     first_response = client.post(
@@ -496,8 +528,8 @@ def test_query_releases_lock_after_failure(
         lambda: FailingAgent(),
     )
 
-    client = TestClient(
-        api.app
+    client = (
+        _authenticated_client()
     )
 
     failed_response = client.post(
@@ -584,8 +616,8 @@ def test_query_times_out_but_keeps_execution_busy(
         lambda: FakeRuntimeSettings(),
     )
 
-    client = TestClient(
-        api.app
+    client = (
+        _authenticated_client()
     )
 
     response = client.post(
@@ -685,4 +717,112 @@ def test_query_times_out_but_keeps_execution_busy(
     assert (
         final_response.status_code
         == 200
+    )
+
+
+@pytest.fixture(
+    autouse=True
+)
+def configure_service_api_auth(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        api,
+        "get_service_api_settings",
+        lambda: FakeServiceAPISettings(),
+    )
+
+
+def test_query_rejects_missing_api_key(
+    monkeypatch,
+):
+    fake_agent = (
+        FakeDataEngineer()
+    )
+
+    monkeypatch.setattr(
+        api,
+        "_get_data_engineer",
+        lambda: fake_agent,
+    )
+
+    client = TestClient(
+        api.app
+    )
+
+    response = client.post(
+        "/query",
+        json={
+            "message": (
+                "Build a pipeline."
+            )
+        },
+    )
+
+    assert (
+        response.status_code
+        == 401
+    )
+
+    assert response.json() == {
+        "detail": (
+            "Invalid API key."
+        )
+    }
+
+    assert (
+        len(
+            fake_agent.calls
+        )
+        == 0
+    )
+
+
+def test_query_rejects_invalid_api_key(
+    monkeypatch,
+):
+    fake_agent = (
+        FakeDataEngineer()
+    )
+
+    monkeypatch.setattr(
+        api,
+        "_get_data_engineer",
+        lambda: fake_agent,
+    )
+
+    client = TestClient(
+        api.app
+    )
+
+    response = client.post(
+        "/query",
+        headers={
+            "X-API-Key": (
+                "wrong-key"
+            )
+        },
+        json={
+            "message": (
+                "Build a pipeline."
+            )
+        },
+    )
+
+    assert (
+        response.status_code
+        == 401
+    )
+
+    assert response.json() == {
+        "detail": (
+            "Invalid API key."
+        )
+    }
+
+    assert (
+        len(
+            fake_agent.calls
+        )
+        == 0
     )

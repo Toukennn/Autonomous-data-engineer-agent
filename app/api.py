@@ -1,5 +1,6 @@
 import os
 import threading
+import secrets
 
 from concurrent.futures import (
     ThreadPoolExecutor,
@@ -7,8 +8,14 @@ from concurrent.futures import (
 )
 
 from fastapi import (
+    Depends,
     FastAPI,
     HTTPException,
+    Security,
+)
+
+from fastapi.security import (
+    APIKeyHeader,
 )
 
 from langchain_core.messages import (
@@ -24,6 +31,7 @@ from pydantic import (
 from config.settings import (
     get_database_settings,
     get_runtime_settings,
+    get_service_api_settings,
 )
 
 from utils.database import (
@@ -45,6 +53,63 @@ app = FastAPI(
     ),
     version="0.1.0",
 )
+
+_SERVICE_API_KEY_HEADER = (
+    APIKeyHeader(
+        name="X-API-Key",
+        auto_error=False,
+    )
+)
+
+def _require_service_api_key(
+    api_key: str | None = Security(
+        _SERVICE_API_KEY_HEADER
+    ),
+) -> None:
+    """
+    Authenticate clients calling protected
+    application endpoints.
+
+    Health and readiness probes remain public.
+
+    The configured secret is never returned or
+    logged.
+    """
+
+    try:
+
+        expected_api_key = (
+            get_service_api_settings()
+            .service_api_key
+            .get_secret_value()
+        )
+
+    except Exception:
+
+        # Fail closed if authentication was not
+        # configured correctly.
+
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Service authentication "
+                "is not configured."
+            ),
+        ) from None
+
+    if (
+        api_key is None
+        or not secrets.compare_digest(
+            api_key,
+            expected_api_key,
+        )
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail=(
+                "Invalid API key."
+            ),
+        )
 
 
 # ============================================================
@@ -431,6 +496,11 @@ def ready() -> ReadinessResponse:
 @app.post(
     "/query",
     response_model=AgentResponse,
+    dependencies=[
+        Depends(
+            _require_service_api_key
+        )
+    ],
 )
 def query(
     request: AgentRequest,
