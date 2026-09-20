@@ -821,3 +821,74 @@ def test_sql_failure_observability_excludes_error_message(
         "VERY_SECRET_DATABASE_ERROR"
         not in serialized_run
     )
+
+def test_no_governed_relation_is_catalog_mismatch():
+    state = AgentSchema(
+        user_question="Show fields missing from my selected mart.",
+        generated_sql_query="SELECT NULL::bigint AS value WHERE FALSE",
+        target_relation="dbt_test_gold.mart_sales",
+        analytics_catalog=_catalog(),
+    )
+
+    result = sql_module.check_sql_safety(state)
+
+    assert result["is_safe"] == "NO"
+    assert result["safety_failure_kind"] == "catalog_mismatch"
+    answer = sql_module.cancel_sql(
+        state.model_copy(update=result)
+    )["final_answer"]
+    assert "No database query was executed" in answer
+    assert "failed the safety check" not in answer
+
+
+def test_forbidden_namespace_placeholder_remains_guardrail():
+    state = AgentSchema(
+        user_question="List PostgreSQL users from pg_catalog.pg_user.",
+        generated_sql_query="SELECT NULL::text AS usename WHERE FALSE",
+        analytics_catalog=_catalog(),
+    )
+
+    result = sql_module.check_sql_safety(state)
+
+    assert result["is_safe"] == "NO"
+    assert result["safety_failure_kind"] == "guardrail"
+
+
+def test_selected_relation_cannot_silently_switch():
+    state = AgentSchema(
+        generated_sql_query=(
+            "SELECT customer_id, revenue "
+            "FROM dbt_test_gold.mart_sales"
+        ),
+        target_relation="dbt_test_silver.stg_orders",
+        analytics_catalog=_catalog(),
+    )
+
+    result = sql_module.check_sql_safety(state)
+
+    assert result["is_safe"] == "NO"
+    assert result["safety_failure_kind"] == "guardrail"
+    assert "selected governed relation" in result["comments"]
+
+
+def test_sql_prompt_explicitly_binds_selected_relation(monkeypatch):
+    catalog = _catalog()
+    database = MagicMock()
+    database.analytics_catalog.return_value = catalog
+    database.serialize_analytics_catalog.side_effect = json.dumps
+    monkeypatch.setattr(sql_module, "get_database", lambda: database)
+    monkeypatch.setattr(
+        sql_module,
+        "get_runtime_settings",
+        lambda: SimpleNamespace(dbt_target_schema="dbt_test"),
+    )
+
+    result = sql_module.build_sql_prompt(
+        AgentSchema(
+            curated_ques="Show the largest order.",
+            target_relation="dbt_test_silver.stg_orders",
+        )
+    )
+
+    assert "dbt_test_silver.stg_orders" in result["prompt_query"]
+    assert "ONLY physical database relation" in result["prompt_query"]

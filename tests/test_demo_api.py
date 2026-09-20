@@ -241,3 +241,120 @@ def test_demo_ingest_passes_discovered_path_to_etl(
     )
     assert status.status_code == 200
     assert status.json()["status"] == "completed"
+
+
+def test_catalog_mismatch_is_presented_as_data_message():
+    record = {
+        "events": [
+            {
+                "event_type": "sql_safety",
+                "name": "governed_sql_validation",
+                "status": "rejected",
+                "metadata": {"decision_kind": "catalog_mismatch"},
+            }
+        ]
+    }
+
+    stages = _ask_stages(record, "completed")
+    message = _guardrail(record)
+
+    assert stages[1]["status"] == "completed"
+    assert stages[2]["status"] == "skipped"
+    assert message["kind"] == "catalog_mismatch"
+    assert message["triggered"] is False
+    assert message["severity"] == "info"
+
+
+def test_demo_ask_checks_catalog_and_passes_selected_relation(
+    monkeypatch,
+    tmp_path,
+):
+    import threading
+    from types import SimpleNamespace
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    import agents.sql_analyst as sql_module
+    from app import demo_api
+
+    catalog = {
+        "schemas": [
+            {
+                "name": "dbt_test_gold",
+                "layer": "gold",
+                "relations": [{"name": "mart_books"}],
+            }
+        ]
+    }
+    database = SimpleNamespace(
+        analytics_catalog=lambda **kwargs: catalog
+    )
+    captured = []
+
+    def invoke(payload):
+        captured.append(payload)
+        return {
+            "is_safe": "YES",
+            "final_answer": "Three books.",
+            "referenced_relations": ["dbt_test_gold.mart_books"],
+        }
+
+    class ImmediatePool:
+        def submit(self, operation, **kwargs):
+            operation(**kwargs)
+
+    monkeypatch.setattr(
+        demo_api,
+        "get_runtime_settings",
+        lambda: SimpleNamespace(
+            data_root=tmp_path,
+            dbt_target_schema="dbt_test",
+            etl_max_tool_calls=8,
+        ),
+    )
+    monkeypatch.setattr(
+        demo_api, "DatabaseUtil", lambda config: database
+    )
+    monkeypatch.setattr(
+        demo_api, "load_database_config", lambda: object()
+    )
+    monkeypatch.setattr(
+        sql_module, "sql_analyst", SimpleNamespace(invoke=invoke)
+    )
+    app = FastAPI()
+    app.include_router(
+        demo_api.create_demo_router(
+            require_demo_api_key=lambda: None,
+            execution_lock=threading.Lock(),
+            execution_pool=ImmediatePool(),
+        )
+    )
+    client = TestClient(app)
+
+    invalid = client.post(
+        "/demo/ask",
+        json={
+            "question": "Show users",
+            "relation": "public.users",
+        },
+    )
+    assert invalid.status_code == 422
+    assert captured == []
+
+    response = client.post(
+        "/demo/ask",
+        json={
+            "question": "Show top books",
+            "relation": " dbt_test_gold.mart_books ",
+        },
+    )
+    assert response.status_code == 202
+    assert response.json()["relation"] == "dbt_test_gold.mart_books"
+    assert captured[0]["target_relation"] == "dbt_test_gold.mart_books"
+    status = client.get(f"/demo/runs/{response.json()['run_id']}")
+    assert status.status_code == 200
+    assert status.json()["status"] == "completed"
+    assert status.json()["result"]["target_relation"] == (
+        "dbt_test_gold.mart_books"
+    )

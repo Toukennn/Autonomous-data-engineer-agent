@@ -18,6 +18,7 @@ from utils.execution_observability import ExecutionRunStore
 
 class DemoAskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=20_000)
+    relation: str | None = Field(default=None, max_length=256)
 
     @field_validator("question")
     @classmethod
@@ -26,6 +27,13 @@ class DemoAskRequest(BaseModel):
         if not value:
             raise ValueError("Question cannot be blank.")
         return value
+
+    @field_validator("relation")
+    @classmethod
+    def normalize_relation(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip() or None
 
 
 class DemoIngestRequest(BaseModel):
@@ -60,6 +68,21 @@ def _safe_value(value):
     return str(value)
 
 
+def _approved_relation_names(
+    database: DatabaseUtil,
+    *,
+    target_schema: str,
+) -> set[str]:
+    catalog = database.analytics_catalog(target_schema=target_schema)
+    return {
+        f"{schema['name']}.{relation['name']}"
+        for schema in catalog.get("schemas", [])
+        if schema.get("layer") in {"silver", "gold"} and schema.get("name")
+        for relation in schema.get("relations", [])
+        if relation.get("name")
+    }
+
+
 def _find_event(record: dict, *names: str) -> dict | None:
     wanted = set(names)
     for event in record.get("events", []):
@@ -90,6 +113,14 @@ def _ask_stages(record: dict, job_status: str) -> list[dict]:
         ]
 
     if validation.get("status") == "rejected":
+        decision_kind = (validation.get("metadata") or {}).get("decision_kind")
+        if decision_kind == "catalog_mismatch":
+            return [
+                _stage("generate", "Generate governed SQL", "SQL generated.", "completed"),
+                _stage("validate", "Validate SQL", "The question could not be grounded in the selected governed data.", "completed"),
+                _stage("execute", "Execute read-only query", "No database query was executed.", "skipped"),
+                _stage("answer", "Format answer", "Return a data-availability message.", "completed" if job_status != "running" else "active"),
+            ]
         return [
             _stage("generate", "Generate governed SQL", "SQL generated.", "completed"),
             _stage("validate", "Validate SQL", "Deterministic governance blocked execution.", "blocked"),
@@ -172,6 +203,17 @@ def _guardrail(record: dict) -> dict | None:
         metadata = event.get("metadata") or {}
 
         if event.get("event_type") == "sql_safety" and status == "rejected":
+            if metadata.get("decision_kind") == "catalog_mismatch":
+                return {
+                    "triggered": False,
+                    "kind": "catalog_mismatch",
+                    "severity": "info",
+                    "title": "No matching governed data",
+                    "message": (
+                        "The SQL analyst could not ground this question in "
+                        "the selected governed data. No database query was executed."
+                    ),
+                }
             return {
                 "triggered": True,
                 "kind": "sql_safety",
@@ -287,7 +329,7 @@ def create_demo_router(
                 detail="Could not initialize demo run.",
             ) from None
 
-    def run_ask(*, run_id: str, question: str) -> None:
+    def run_ask(*, run_id: str, question: str, relation: str | None) -> None:
         try:
             from agents.sql_analyst import sql_analyst
 
@@ -295,6 +337,7 @@ def create_demo_router(
                 {
                     "user_question": question,
                     "run_id": run_id,
+                    "target_relation": relation or "",
                 }
             )
 
@@ -307,7 +350,11 @@ def create_demo_router(
             guardrail = _guardrail(record)
 
             if state.get("is_safe") != "YES":
-                status = "blocked"
+                status = (
+                    "completed"
+                    if state.get("safety_failure_kind") == "catalog_mismatch"
+                    else "blocked"
+                )
             elif state.get("sql_execution_failed", False):
                 status = "failed"
             else:
@@ -324,6 +371,7 @@ def create_demo_router(
                     "rows": rows,
                     "truncated": state.get("sql_result_truncated", False),
                     "referenced_relations": state.get("referenced_relations", []),
+                    "target_relation": relation,
                     "guardrail": guardrail,
                 },
             )
@@ -474,6 +522,22 @@ Requirements:
 
     @router.post("/ask", status_code=202)
     def ask(request: DemoAskRequest, response: Response) -> dict:
+        if request.relation:
+            database = DatabaseUtil(load_database_config())
+            approved = _approved_relation_names(
+                database,
+                target_schema=runtime.dbt_target_schema,
+            )
+            if request.relation not in approved:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "The selected relation is no longer present in the "
+                        "governed Silver/Gold analytics catalog. Refresh "
+                        "the catalog or ingest the dataset again."
+                    ),
+                )
+
         acquire_slot()
         run_id = str(uuid4())
         start_record(run_id, "ask")
@@ -484,6 +548,7 @@ Requirements:
                 run_ask,
                 run_id=run_id,
                 question=request.question,
+                relation=request.relation,
             )
         except Exception:
             _safe_complete(store, run_id, "failed")
@@ -504,6 +569,7 @@ Requirements:
             "run_id": run_id,
             "mode": "ask",
             "status": "running",
+            "relation": request.relation,
         }
 
     @router.post("/ingest", status_code=202)

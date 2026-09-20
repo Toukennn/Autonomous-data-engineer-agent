@@ -26,10 +26,19 @@ class AgentSchema(BaseModel):
         default_factory=dict
     )
 
+    # Optional Silver/Gold relation selected by the demo caller.
+    target_relation: str = ""
+
     is_safe: Literal[
         "YES",
         "NO",
     ] = "NO"
+
+    safety_failure_kind: Literal[
+        "",
+        "catalog_mismatch",
+        "guardrail",
+    ] = ""
 
     generated_sql_query: str = ""
     comments: str = ""
