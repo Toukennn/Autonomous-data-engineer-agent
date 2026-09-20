@@ -210,7 +210,7 @@ def _safe_complete(store: ExecutionRunStore, run_id: str, status: str) -> None:
 
 def create_demo_router(
     *,
-    require_service_api_key: Callable,
+    require_demo_api_key: Callable,
     execution_lock,
     execution_pool,
 ) -> APIRouter:
@@ -225,7 +225,7 @@ def create_demo_router(
     router = APIRouter(
         prefix="/demo",
         tags=["demo"],
-        dependencies=[Depends(require_service_api_key)],
+        dependencies=[Depends(require_demo_api_key)],
     )
 
     runtime = get_runtime_settings()

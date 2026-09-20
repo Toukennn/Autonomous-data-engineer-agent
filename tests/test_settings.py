@@ -7,6 +7,7 @@ from pydantic import (
 from config.settings import (
     PROJECT_ROOT,
     DatabaseSettings,
+    DemoAPISettings,
     RuntimeSettings,
 )
 
@@ -190,3 +191,19 @@ def test_runtime_rejects_relative_data_root(
         RuntimeSettings(
             _env_file=None
         )
+
+def test_demo_api_key_is_required_and_at_least_32_characters(
+    monkeypatch,
+):
+    monkeypatch.delenv("DEMO_API_KEY", raising=False)
+    with pytest.raises(ValidationError, match="DEMO_API_KEY"):
+        DemoAPISettings(_env_file=None)
+
+    monkeypatch.setenv("DEMO_API_KEY", "too-short")
+    with pytest.raises(ValidationError, match="DEMO_API_KEY"):
+        DemoAPISettings(_env_file=None)
+
+    value = "demo-key-" + "a" * 32
+    monkeypatch.setenv("DEMO_API_KEY", value)
+    settings = DemoAPISettings(_env_file=None)
+    assert settings.demo_api_key.get_secret_value() == value

@@ -292,6 +292,37 @@ class ServiceAPISettings(
         return value
     
 
+class DemoAPISettings(
+    _BaseAppSettings
+):
+    """
+    Authentication for the public portfolio
+    demo endpoints.
+    """
+
+    demo_api_key: SecretStr = Field(
+        validation_alias="DEMO_API_KEY"
+    )
+
+    @field_validator(
+        "demo_api_key"
+    )
+    @classmethod
+    def validate_demo_api_key(
+        cls,
+        value: SecretStr,
+    ) -> SecretStr:
+        if len(
+            value.get_secret_value()
+        ) < 32:
+            raise ValueError(
+                "DEMO_API_KEY must be at "
+                "least 32 characters."
+            )
+
+        return value
+
+
 class LLMSettings(_BaseAppSettings):
     """
     LLM provider and model configuration.
@@ -342,6 +373,13 @@ def get_service_api_settings() -> (
     ServiceAPISettings
 ):
     return ServiceAPISettings()
+
+@lru_cache
+def get_demo_api_settings() -> (
+    DemoAPISettings
+):
+    return DemoAPISettings()
+
 
 @lru_cache
 def get_llm_settings() -> LLMSettings:

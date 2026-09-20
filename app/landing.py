@@ -34,7 +34,7 @@ main{padding:32px 0 70px}.shell{display:grid;gap:18px}.card{border:1px solid var
 <section class="card control-card">
 <div class="label-row"><label for="key">Authorized demo key</label><span id="saved" class="saved">not saved</span></div>
 <input id="key" type="password" autocomplete="off" placeholder="Paste your demo key">
-<p class="hint">Stored only in this tab's sessionStorage. It survives refresh, but not browser close.</p>
+<p class="hint"><b>Need a demo key?</b> Demo access is restricted to prevent abuse and unexpected API/LLM usage. Request an authorized key from the <a href="https://github.com/Toukennn" target="_blank" rel="noreferrer">project owner via GitHub</a>. The key is stored only for this browser session and is never saved to local storage.</p>
 
 <div class="seg" role="tablist" aria-label="Demo mode"><button id="ask-tab" class="active" type="button">Ask a question</button><button id="ingest-tab" type="button">Ingest an API</button></div>
 
@@ -77,8 +77,9 @@ main{padding:32px 0 70px}.shell{display:grid;gap:18px}.card{border:1px solid var
 <script>
 const $=id=>document.getElementById(id);const key=$("key"),saved=$("saved"),askTab=$("ask-tab"),ingestTab=$("ingest-tab"),askMode=$("ask-mode"),ingestMode=$("ingest-mode"),runBtn=$("run"),elapsed=$("elapsed"),runCard=$("run-card"),runStatus=$("run-status"),stagesEl=$("stages"),placeholder=$("placeholder"),guard=$("guard"),guardTitle=$("guard-title"),guardMessage=$("guard-message"),sql=$("sql"),sqlTitle=$("sql-title"),answer=$("answer"),answerTitle=$("answer-title"),tableTitle=$("table-title"),tableEl=$("table"),relation=$("relation"),askLatest=$("ask-latest"),relationHint=$("relation-hint");
 let mode="ask",timer=null,startMs=0,currentRelation=sessionStorage.getItem("latestGoldRelation")||"";
-const storedKey=sessionStorage.getItem("demoApiKey")||"";if(storedKey){key.value=storedKey;saved.textContent="key saved";saved.classList.add("ok");setTimeout(loadCatalog,50)}
-key.addEventListener("input",()=>{const v=key.value.trim();if(v){sessionStorage.setItem("demoApiKey",v);saved.textContent="key saved";saved.classList.add("ok")}else{sessionStorage.removeItem("demoApiKey");saved.textContent="not saved";saved.classList.remove("ok")}});key.addEventListener("change",loadCatalog);
+const DEMO_KEY_STORAGE="autonomous-de-demo-key";
+const storedKey=sessionStorage.getItem(DEMO_KEY_STORAGE)||"";if(storedKey){key.value=storedKey;saved.textContent="Key saved";saved.classList.add("ok");setTimeout(loadCatalog,50)}
+key.addEventListener("input",()=>{const v=key.value.trim();if(v){sessionStorage.setItem(DEMO_KEY_STORAGE,v);saved.textContent="Key saved";saved.classList.add("ok")}else{sessionStorage.removeItem(DEMO_KEY_STORAGE);saved.textContent="";saved.classList.remove("ok")}});key.addEventListener("change",loadCatalog);
 function setMode(next){mode=next;const ask=next==="ask";askTab.classList.toggle("active",ask);ingestTab.classList.toggle("active",!ask);askMode.classList.toggle("active",ask);ingestMode.classList.toggle("active",!ask);$("run-title").textContent=ask?"SQL analyst run":"ETL analyst run"}askTab.onclick=()=>setMode("ask");ingestTab.onclick=()=>setMode("ingest");
 function auth(){return {"X-API-Key":key.value.trim()}}
 async function loadCatalog(){if(!key.value.trim())return;try{const r=await fetch("/demo/catalog",{headers:auth(),cache:"no-store"});if(!r.ok)return;const p=await r.json();const gold=(p.relations||[]).filter(x=>x.layer==="gold");if(currentRelation&&!gold.some(x=>x.relation===currentRelation))currentRelation="";if(!currentRelation&&gold.length)currentRelation=gold[0].relation;if(currentRelation)relationHint.textContent="Examples currently use: "+currentRelation}catch(e){}}

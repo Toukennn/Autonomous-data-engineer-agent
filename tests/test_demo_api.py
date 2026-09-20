@@ -90,7 +90,7 @@ def test_quality_failure_is_presented_as_guardrail():
     assert guardrail["kind"] == "quality_gate"
 
 
-def test_demo_routes_require_service_key_and_are_registered(
+def test_demo_routes_use_only_demo_key_and_are_registered(
     monkeypatch,
 ):
     from types import SimpleNamespace
@@ -100,22 +100,56 @@ def test_demo_routes_require_service_key_and_are_registered(
 
     from app import api
 
+    demo_key = "demo-" + "a" * 32
+    service_key = "service-" + "b" * 32
+
+    monkeypatch.setattr(
+        api,
+        "get_demo_api_settings",
+        lambda: SimpleNamespace(
+            demo_api_key=SecretStr(demo_key)
+        ),
+    )
     monkeypatch.setattr(
         api,
         "get_service_api_settings",
         lambda: SimpleNamespace(
-            service_api_key=SecretStr("test-demo-api-key")
+            service_api_key=SecretStr(service_key)
         ),
     )
 
     client = TestClient(api.app)
     path = "/demo/runs/not-a-valid-run-id"
 
-    unauthenticated = client.get(path)
-    assert unauthenticated.status_code == 401
+    assert client.get(path).status_code == 401
+    assert client.get(
+        path,
+        headers={"X-API-Key": service_key},
+    ).status_code == 401
 
     authenticated = client.get(
         path,
-        headers={"X-API-Key": "test-demo-api-key"},
+        headers={"X-API-Key": demo_key},
     )
     assert authenticated.status_code == 404
+
+    service_response = client.post(
+        "/query",
+        headers={"X-API-Key": demo_key},
+        json={"message": "Hello"},
+    )
+    assert service_response.status_code == 401
+
+    def missing_demo_settings():
+        raise RuntimeError("missing")
+
+    monkeypatch.setattr(
+        api,
+        "get_demo_api_settings",
+        missing_demo_settings,
+    )
+    unavailable = client.get(path)
+    assert unavailable.status_code == 503
+    assert unavailable.json() == {
+        "detail": "Demo authentication is not configured."
+    }

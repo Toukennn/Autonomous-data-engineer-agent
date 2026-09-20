@@ -13,3 +13,8 @@ def test_landing_page_is_public_and_human_friendly():
     assert "Ask a question" in response.text
     assert "Ingest an API" in response.text
     assert "X-API-Key" in response.text
+    assert "Need a demo key?" in response.text
+    assert "https://github.com/Toukennn" in response.text
+    assert "autonomous-de-demo-key" in response.text
+    assert "sessionStorage" in response.text
+    assert "localStorage" not in response.text

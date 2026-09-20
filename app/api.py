@@ -38,6 +38,7 @@ from pydantic import (
 
 from config.settings import (
     get_database_settings,
+    get_demo_api_settings,
     get_runtime_settings,
     get_service_api_settings,
 )
@@ -196,6 +197,45 @@ def _require_service_api_key(
         )
 
 
+def _require_demo_api_key(
+    api_key: str | None = Security(
+        _SERVICE_API_KEY_HEADER
+    ),
+) -> None:
+    """
+    Authenticate portfolio demo requests with
+    a credential independent of /query.
+    """
+
+    try:
+        expected_api_key = (
+            get_demo_api_settings()
+            .demo_api_key
+            .get_secret_value()
+        )
+
+    except Exception:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Demo authentication "
+                "is not configured."
+            ),
+        ) from None
+
+    if (
+        api_key is None
+        or not secrets.compare_digest(
+            api_key,
+            expected_api_key,
+        )
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid demo key.",
+        )
+
+
 # ============================================================
 # SINGLE-PROCESS EXECUTION GUARD
 # ============================================================
@@ -229,8 +269,8 @@ _AGENT_EXECUTION_POOL = (
 
 app.include_router(
     create_demo_router(
-        require_service_api_key=(
-            _require_service_api_key
+        require_demo_api_key=(
+            _require_demo_api_key
         ),
         execution_lock=(
             _AGENT_EXECUTION_LOCK
