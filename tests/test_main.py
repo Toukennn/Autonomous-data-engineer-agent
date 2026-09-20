@@ -929,3 +929,169 @@ def test_query_rejects_invalid_api_key(
         )
         == 0
     )
+
+
+def test_query_emits_safe_structured_events(
+    monkeypatch,
+):
+    events = []
+
+    def capture_event(
+        **kwargs,
+    ):
+        events.append(
+            kwargs
+        )
+
+    monkeypatch.setattr(
+        api,
+        "emit_http_event",
+        capture_event,
+    )
+
+    fake_agent = (
+        FakeDataEngineer()
+    )
+
+    monkeypatch.setattr(
+        api,
+        "_get_data_engineer",
+        lambda: fake_agent,
+    )
+
+    client = (
+        _authenticated_client()
+    )
+
+    secret_prompt = (
+        "TOP-SECRET-PROMPT-DO-NOT-LOG"
+    )
+
+    response = client.post(
+        "/query",
+        json={
+            "message": (
+                secret_prompt
+            )
+        },
+    )
+
+    assert (
+        response.status_code
+        == 200
+    )
+
+    event_names = {
+        event[
+            "event"
+        ]
+        for event in events
+    }
+
+    assert (
+        "http_request.completed"
+        in event_names
+    )
+
+    assert (
+        "agent_run.started"
+        in event_names
+    )
+
+    assert (
+        "agent_run.completed"
+        in event_names
+    )
+
+    serialized_events = (
+        repr(
+            events
+        )
+    )
+
+    assert (
+        secret_prompt
+        not in serialized_events
+    )
+
+    assert (
+        TEST_SERVICE_API_KEY
+        not in serialized_events
+    )
+
+
+def test_agent_logs_use_response_correlation_ids(
+    monkeypatch,
+):
+    events = []
+
+    monkeypatch.setattr(
+        api,
+        "emit_http_event",
+        lambda **kwargs: (
+            events.append(
+                kwargs
+            )
+        ),
+    )
+
+    fake_agent = (
+        FakeDataEngineer()
+    )
+
+    monkeypatch.setattr(
+        api,
+        "_get_data_engineer",
+        lambda: fake_agent,
+    )
+
+    client = (
+        _authenticated_client()
+    )
+
+    response = client.post(
+        "/query",
+        json={
+            "message": "Run ETL."
+        },
+    )
+
+    request_id = (
+        response.headers[
+            "X-Request-ID"
+        ]
+    )
+
+    run_id = (
+        response.headers[
+            "X-Run-ID"
+        ]
+    )
+
+    run_events = [
+        event
+        for event in events
+        if event[
+            "event"
+        ].startswith(
+            "agent_run."
+        )
+    ]
+
+    assert run_events
+
+    assert all(
+        event[
+            "request_id"
+        ]
+        == request_id
+        for event in run_events
+    )
+
+    assert all(
+        event.get(
+            "run_id"
+        )
+        == run_id
+        for event in run_events
+    )

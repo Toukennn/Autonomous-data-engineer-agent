@@ -1,6 +1,9 @@
 import os
 import threading
 import secrets
+from time import (
+    perf_counter,
+)
 from uuid import uuid4
 
 from concurrent.futures import (
@@ -41,6 +44,10 @@ from utils.database import (
     DatabaseUtil,
 )
 
+from utils.http_observability import (
+    emit_http_event,
+)
+
 
 # ============================================================
 # APPLICATION
@@ -65,8 +72,11 @@ async def add_request_id(
     call_next,
 ):
     """
-    Assign one server-generated correlation ID
-    to every HTTP request.
+    Assign one server-generated request ID and
+    emit a safe structured HTTP completion event.
+
+    Request bodies, headers, credentials, and
+    exception details are deliberately excluded.
     """
 
     request_id = (
@@ -77,15 +87,48 @@ async def add_request_id(
         request_id
     )
 
-    response = await call_next(
-        request
+    started_at = (
+        perf_counter()
     )
 
-    response.headers[
-        "X-Request-ID"
-    ] = request_id
+    status_code = 500
 
-    return response
+    try:
+
+        response = await call_next(
+            request
+        )
+
+        status_code = (
+            response.status_code
+        )
+
+        response.headers[
+            "X-Request-ID"
+        ] = request_id
+
+        return response
+
+    finally:
+
+        duration_ms = (
+            (
+                perf_counter()
+                - started_at
+            )
+            * 1000
+        )
+
+        emit_http_event(
+            event=(
+                "http_request.completed"
+            ),
+            request_id=request_id,
+            method=request.method,
+            path=request.url.path,
+            status_code=status_code,
+            duration_ms=duration_ms,
+        )
 
 
 _SERVICE_API_KEY_HEADER = (
@@ -327,17 +370,27 @@ def _extract_final_response(
 
 def _execute_agent_request(
     message: str,
+    request_id: str,
+    run_id: str,
 ) -> str:
     """
     Execute one agent request inside the dedicated
-    execution worker.
+    worker while emitting safe run-level
+    observability.
 
-    The execution lock is released only when the
-    underlying agent execution has actually ended.
-
-    This is important because an HTTP timeout does
-    not safely terminate a Python worker thread.
+    The user message itself is deliberately never
+    logged.
     """
+
+    started_at = (
+        perf_counter()
+    )
+
+    emit_http_event(
+        event="agent_run.started",
+        request_id=request_id,
+        run_id=run_id,
+    )
 
     try:
 
@@ -357,11 +410,51 @@ def _execute_agent_request(
             )
         )
 
-        return (
+        response = (
             _extract_final_response(
                 result
             )
         )
+
+    except Exception:
+
+        duration_ms = (
+            (
+                perf_counter()
+                - started_at
+            )
+            * 1000
+        )
+
+        emit_http_event(
+            event="agent_run.failed",
+            request_id=request_id,
+            run_id=run_id,
+            duration_ms=duration_ms,
+        )
+
+        raise
+
+    else:
+
+        duration_ms = (
+            (
+                perf_counter()
+                - started_at
+            )
+            * 1000
+        )
+
+        emit_http_event(
+            event=(
+                "agent_run.completed"
+            ),
+            request_id=request_id,
+            run_id=run_id,
+            duration_ms=duration_ms,
+        )
+
+        return response
 
     finally:
 
@@ -553,6 +646,12 @@ def query(
     actually terminates.
     """
 
+    request_id = (
+        http_request
+        .state
+        .request_id
+    )
+
     acquired = (
         _AGENT_EXECUTION_LOCK.acquire(
             blocking=False
@@ -560,6 +659,13 @@ def query(
     )
 
     if not acquired:
+
+        emit_http_event(
+            event="agent_run.busy",
+            request_id=request_id,
+            status_code=503,
+        )
+
         raise HTTPException(
             status_code=503,
             detail=(
@@ -570,19 +676,10 @@ def query(
             },
         )
 
-    request_id = (
-        http_request
-        .state
-        .request_id
-    )
-
     run_id = (
         uuid4().hex
     )
 
-    # request_id will be connected to structured
-    # execution logs in Phase 2L.6.
-    _ = request_id
 
     try:
 
@@ -590,6 +687,8 @@ def query(
             _AGENT_EXECUTION_POOL.submit(
                 _execute_agent_request,
                 request.message,
+                request_id,
+                run_id,
             )
         )
 
@@ -600,6 +699,15 @@ def query(
         # the execution lock.
 
         _AGENT_EXECUTION_LOCK.release()
+
+        emit_http_event(
+            event=(
+                "agent_run.submission_failed"
+            ),
+            request_id=request_id,
+            run_id=run_id,
+            status_code=500,
+        )
 
         raise HTTPException(
             status_code=500,
@@ -614,6 +722,10 @@ def query(
     timeout_seconds = (
         get_runtime_settings()
         .agent_request_timeout_seconds
+    )
+
+    wait_started_at = (
+        perf_counter()
     )
 
     completed, _ = wait(
@@ -633,6 +745,24 @@ def query(
         #
         # _execute_agent_request() releases the lock
         # only after the real execution ends.
+
+        duration_ms = (
+            (
+                perf_counter()
+                - wait_started_at
+            )
+            * 1000
+        )
+
+        emit_http_event(
+            event=(
+                "agent_run.http_timeout"
+            ),
+            request_id=request_id,
+            run_id=run_id,
+            status_code=504,
+            duration_ms=duration_ms,
+        )
 
         raise HTTPException(
             status_code=504,
