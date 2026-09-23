@@ -293,6 +293,10 @@ uv run pytest -v
 
 GitHub Actions also validates:
 
+- Ruff and the deterministic unit test suite
+- real PostgreSQL connectivity
+- dbt Silver/Gold builds against an ephemeral PostgreSQL service
+- governed catalog discovery and bounded Gold queries through `DatabaseUtil`
 - package build
 - Docker image build
 - container startup

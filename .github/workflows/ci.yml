@@ -91,6 +91,82 @@ jobs:
 
 
   # ==========================================================
+  # POSTGRESQL / DBT INTEGRATION GATE
+  # ==========================================================
+
+  database-integration:
+    name: PostgreSQL Integration
+
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: agent_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d agent_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DB_HOST: localhost
+      DB_PORT: "5432"
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_NAME: agent_test
+
+      DBT_TARGET_SCHEMA: dbt_test
+      DBT_THREADS: "1"
+
+      DATA_ROOT: /tmp/autonomous-data-engineer-agent-ci
+      SQL_STATEMENT_TIMEOUT_MS: "10000"
+      SQL_MAX_ROWS: "1000"
+
+      RUN_DATABASE_INTEGRATION: "1"
+
+      # Dummy values only. Integration tests do not call LLM APIs.
+      OPENAI_API_KEY: sk-test
+      ANTHROPIC_API_KEY: sk-ant-test
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.1.0
+        with:
+          enable-cache: true
+          version: latest-known
+
+      - name: Install Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --locked --python 3.12
+
+      - name: Verify PostgreSQL connectivity
+        run: >-
+          uv run pytest
+          tests/integration/test_postgres_warehouse.py::test_database_settings_connect_to_postgres
+          -v
+
+      - name: Run warehouse and dbt integration tests
+        run: >-
+          uv run pytest
+          tests/integration/test_postgres_warehouse.py::test_dbt_build_is_visible_in_governed_catalog
+          tests/integration/test_postgres_warehouse.py::test_database_util_queries_bounded_gold_results
+          -v
+
+
+  # ==========================================================
   # DOCKER IMAGE GATE
   # ==========================================================
 
@@ -99,6 +175,7 @@ jobs:
 
     needs:
       - quality
+      - database-integration
 
     runs-on: ubuntu-latest
 
